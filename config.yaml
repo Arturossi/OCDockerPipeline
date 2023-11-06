@@ -1,0 +1,11 @@
+# Workflow settings
+cpu_cores: 18
+
+# Logging settings
+logprefix: ""
+logDir: "/data/hd4tb/OCDocker/logs"
+log_level: "info"    # Options: "debug", "info", "warning", "error", "critical"
+log_handler: "file"  # Options: "file", "console", or "file_and_console"
+
+# Database settings
+pdbbindTarGzPath: "/data/hd4tb/OCDocker/data/PDBbind_v2020_refined.tar.gz"
