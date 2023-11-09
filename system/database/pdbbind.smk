@@ -118,7 +118,6 @@ rule processPdbBind:
                 
             # Move the contents of sourcePath directly into destPath
             for item in os.listdir(sourcePath):
-                print("Moving", item)
                 shutil.move(os.path.join(sourcePath, item), destPath)
 
             # Create the compounds folder inside the protein folder
@@ -147,8 +146,14 @@ rule processPdbBind:
                     # Remove it
                     os.remove(f"{destPath}/{wildcards.target}_{unwanted[0]}.{unwanted[1]}")
 
-            # Convert the ligand to smiles and save it in the ligand folder
-            _ = occonversion.convertMols(f"{destPath}/reference_ligand.mol2", output.ligand)
+            try:
+                # Convert the ligand to smiles and save it in the ligand folder
+                _ = occonversion.convertMols(f"{destPath}/reference_ligand.mol2", output.ligand)
+            except:
+                # Append the molecule name to the list of molecules that will not be processed in the file
+                with open(config["ignored_pdb_database_index"], "a") as f:
+                    f.write(f"{wildcards.target}\n")
+                return ocerror.Error.malformed_molecule(f"The reference ligand in path '{destPath}/reference_ligand.mol2' could not be converted to smiles. This molecule will not be processed.", level = ocerror.ReportLevel.ERROR)
 
             # Parameterize the reference ligand extensions in a list (in order of preference)
             ref_ligand_exts = ["mol2", "sdf", "pdb"]
