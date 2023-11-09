@@ -9,3 +9,5 @@ log_handler: "file"  # Options: "file", "console", or "file_and_console"
 
 # Database settings
 pdbbindTarGzPath: "/data/hd4tb/OCDocker/data/PDBbind_v2020_refined.tar.gz"
+pdb_database_index: "/data/hd4tb/OCDocker/data/pdbbind_proteins.txt"
+ignored_pdb_database_index: "/data/hd4tb/OCDocker/data/problematic_pdbbind_proteins.txt"

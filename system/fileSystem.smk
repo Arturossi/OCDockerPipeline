@@ -37,9 +37,7 @@ This project is licensed under the GNU General Public License v3.0
 import sys
 sys.path.append("/data/hd4tb/OCDocker/OCDocker")
 import os
-global emptyArgs
-emptyArgs = True
-from OCDocker.InitialiseNoArgs import *
+from OCDocker.Initialise import *
 
 # Rules
 ###############################################################################
