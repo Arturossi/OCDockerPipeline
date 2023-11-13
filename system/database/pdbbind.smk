@@ -77,6 +77,9 @@ rule extractPdbBind:
         if not os.path.isdir(pdbbind_archive) or overwrite:
             # Untar the file
             ocff.untar(input.pdbbindTarGzPath, pdbbind_archive)
+        else:
+            # Print a warning
+            ocerror.Error.dir_exists(f"The folder '{pdbbind_archive}' already exists and the user does not want to overwrite it. The PDBbind dataset will not be extracted.", level = ocerror.ReportLevel.WARNING)
 
 rule processPdbBind:
     """
@@ -108,6 +111,11 @@ rule processPdbBind:
             if not os.path.isdir(sourcePath):
                 # Print an error
                 return ocerror.Error.dir_not_exist(f"The folder '{sourcePath}' does not exist. Please, check if the dataset is correct and try again.", level = ocerror.ReportLevel.ERROR)
+
+            # If the source path has no files
+            if not os.listdir(sourcePath):
+                # Return a warning
+                return ocerror.Error.empty_dir(f"The folder '{sourcePath}' is empty. This molecule might not be processed.", level = ocerror.ReportLevel.WARNING)
             
             # If the user wants to overwrite the folder
             if overwrite:
@@ -121,13 +129,13 @@ rule processPdbBind:
                 shutil.move(os.path.join(sourcePath, item), destPath)
 
             # Create the compounds folder inside the protein folder
-            _ = ocff.safe_create_dir(f"{destPath}/compounds")
+            #_ = ocff.safe_create_dir(f"{destPath}/compounds")
             # Create the ligands folder inside the compounds folder (PDBbind only has one ligand per protein)
-            _ = ocff.safe_create_dir(f"{destPath}/compounds/ligands")
+            #_ = ocff.safe_create_dir(f"{destPath}/compounds/ligands")
             # Create the ligand folder inside the ligands folder (yes, generic name until I find a better one)
-            _ = ocff.safe_create_dir(f"{destPath}/compounds/ligands/ligand")
+            #_ = ocff.safe_create_dir(f"{destPath}/compounds/ligands/ligand")
             # Create the boxes folder inside the ligand folder
-            _ = ocff.safe_create_dir(f"{destPath}/compounds/ligands/ligand/boxes")
+            #_ = ocff.safe_create_dir(f"{destPath}/compounds/ligands/ligand/boxes")
 
             # Make a copy of the ligands to serve as reference and then move the ligand files to the ligands folder (mol2 and sdf)
             shutil.copy(os.path.join(destPath, wildcards.target + "_ligand.mol2"), f"{destPath}/reference_ligand.mol2")
@@ -149,6 +157,8 @@ rule processPdbBind:
             try:
                 # Convert the ligand to smiles and save it in the ligand folder
                 _ = occonversion.convertMols(f"{destPath}/reference_ligand.mol2", output.ligand)
+                # Make a copy of the ligand to serve as reference and then move the ligand files to the ligands folder (smi)
+                shutil.copy(output.ligand, f"{destPath}/reference_ligand.smi")
             except:
                 # Append the molecule name to the list of molecules that will not be processed in the file
                 with open(config["ignored_pdb_database_index"], "a") as f:
@@ -156,7 +166,7 @@ rule processPdbBind:
                 return ocerror.Error.malformed_molecule(f"The reference ligand in path '{destPath}/reference_ligand.mol2' could not be converted to smiles. This molecule will not be processed.", level = ocerror.ReportLevel.ERROR)
 
             # Parameterize the reference ligand extensions in a list (in order of preference)
-            ref_ligand_exts = ["mol2", "sdf", "pdb"]
+            ref_ligand_exts = ["smi", "mol2", "sdf", "smiles", "pdb"]
 
             # Set the target centroid to None
             targetCentroid = None
@@ -197,16 +207,19 @@ rule processPdbBind:
                 # Create the ligand object
                 m = ocl.Ligand(output.ligand, wildcards.target, sanitize = True)
             except:
-                # Create the ligand object (without sanitizing)
-                m = ocl.Ligand(output.ligand, wildcards.target, sanitize = False)
+                try:
+                    # Create the ligand object (without sanitizing)
+                    m = ocl.Ligand(output.ligand, wildcards.target, sanitize = False)
+                except:
+                    return ocerror.Error.malformed_molecule(f"The ligand in path '{output.ligand}' could not be converted to smiles. This molecule will not be processed.", level = ocerror.ReportLevel.ERROR)
 
             # Test if the Radius of Gyration is None
             if not m.RadiusOfGyration: # type: ignore
                 # Append the molecule name to the list of molecules that will not be processed in the file
                 with open(config["ignored_pdb_database_index"], "a") as f:
-                    f.write(f"{wildcards.target}\n")
+                    f.write(wildcards.target + "\n")
                 # Print a warning
-                return ocerror.Error.malformed_molecule("The Radius of Gyration of the ligand is None. The ligand will not be processed.", level = ocerror.ReportLevel.ERROR)
+                return ocerror.Error.malformed_molecule("The Radius of Gyration of the ligand is None. The ligand " + wildcards.target + "will not be processed.", level = ocerror.ReportLevel.ERROR)
 
             # Create a box around the ligand
             m.create_box(centroid = targetCentroid, overwrite = overwrite)
