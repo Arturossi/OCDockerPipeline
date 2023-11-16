@@ -10,20 +10,33 @@ Created: 06-11-2023
 Last modified: 06-11-2023
 """
 
+# Initial directives
+###############################################################################
+configfile: "config.yaml"
+
 
 # Python functions and imports
 ###############################################################################
 import sys
 
+from glob import glob
+
 sys.path.append("/data/hd4tb/OCDocker/OCDocker")
 from OCDocker.Initialise import *
+
+import OCDP.preload as OCDPpre
+
+pdb_database_index = config["pdb_database_index"]
+
+pdbbind_targets = OCDPpre.preload_PDBbind(pdb_database_index, config["ignored_pdb_database_index"])
 
 
 # Program imports
 ###############################################################################
 include: "system/fileSystem.smk"
 #include: "system/database/pdbbind.smk"
-include: "system/database/dudez.smk"
+#include: "system/database/dudez.smk"
+include: "docking/plants.smk"
 
 
 # Python definitions
@@ -55,13 +68,6 @@ overwrite = False               # Overwrite the output files
 # Wildcards
 ###############################################################################
 
-# Initial directives
-###############################################################################
-configfile: "config.yaml"
-
-## DUDEz database ##
-
-
 
 # License
 ###############################################################################
@@ -80,6 +86,28 @@ This project is licensed under the GNU General Public License v3.0
 # Rules
 ###############################################################################
 
+rule db_pdbbind:
+    """
+    Download the PDBbind database.
+    """
+    output:
+        pdbbind_archive,
+    output:
+        ocdb_path + "/PDBbind/{pdbbind_target}/compounds/ligands/{target}/ligand.mol2",
+    run:
+        print(input.pdbbind_targets)
+
 rule all:
+    """
+    Prepare the input files for PLANTS docking software.
+    """
     input:
-        "/tmp/ocdocker/dudez_complete.sentinel"
+        plants_result = expand(
+                ocdb_path + "/{database}/{pdbbind_target}/compounds/{kind}/{target}/plantsFiles/run/prepared_ligand_entry_00001_conf_01.mol2",
+                database = ["PDBbind"], 
+                pdbbind_target = pdbbind_targets, 
+                kind = ["ligands", "decoys"],
+                target = [os.path.basename(x) for x in glob(ocdb_path + "/{database}/{pdbbind_target}/compounds/{kind}/*")],
+            ),
+    run:
+        print(input.plants_result)

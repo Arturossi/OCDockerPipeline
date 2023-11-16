@@ -9,13 +9,15 @@ Created: 06-11-2023
 Last modified: 06-11-2023
 """
 
+
 # Initial directives
 ###############################################################################
 configfile: "config.yaml"
 
+
 # License
 ###############################################################################
-'''
+"""
 OCDocker pipeline
 Authors: Rossi, A.D.; Pascutti, P.G.; Torres, P.H.M;
 [Federal University of Rio de Janeiro, UFRJ, Brazil]
@@ -25,7 +27,7 @@ Modeling and Molecular Dynamics Laboratory,
 Av. Carlos Chagas Filho 373 - CCS - bloco G1-19, Cidade Universitária - Rio de Janeiro, RJ - Brazil
 E-mail address: arturossi10@gmail.com
 This project is licensed under the GNU General Public License v3.0
-'''
+"""
 
 # Wildcards
 ###############################################################################
@@ -36,73 +38,76 @@ This project is licensed under the GNU General Public License v3.0
 # Rules
 ###############################################################################
 
-rule GenerateMutationImages:
+
+rule runPLANTS:
     """
-    Generate images of the mutated protein structures and color them according to the results of the program.
+    Run PLANTS docking software.
 
     Inputs:
-        (file): Input pdb file.
-        (file): Input list of mutations.
+        (file): The prepared ligand file.
+        (file): The prepared receptor file.
     Outputs:
-        (file): Images of the protein mutations for multiple angles.
+        (file): The PLANTS output file.
     """
     params:
-        n_rotations = config['n_rotations'],
-        generateGif = config['generateGif'],
-        total_duration = config['total_duration'],
-        protein_color = config['protein_color'],
-        missing_data_color = config['missing_data_color'],
-        multiple_mutation_color_min = config['multiple_mutation_color_min'],
-        multiple_mutation_color_max = config['multiple_mutation_color_max'],
-        location = config['location']
+        plants_log=config["logDir"] + "/plants.log",
     input:
-        "{outdir}/{filename}/{filename}.pdb",
-        "{outdir}/{filename}/{program}/{filename}.csv",
+        ligand="{database}/{pdbbind_target}/compounds/{kind}/{target}/ligand.smi",
     output:
-        "{outdir}/{filename}/images/{program}/{filename}_{axis}.png"
-    resources:
-        pymol=1
+        prepared_receptor = "{database}/{pdbbind_target}/compounds/{kind}/{target}/prepared_receptor.mol2",
+        prepared_ligand = "{database}/{pdbbind_target}/compounds/{kind}/{target}/plantsFiles/run/prepared_ligand.mol2",
+        plants_output = "{database}/{pdbbind_target}/compounds/{kind}/{target}/plantsFiles/run/prepared_ligand_entry_00001_conf_01.mol2",
+    threads: 1
     run:
-        # Read the csv file with the program results according to the program
-        if(wildcards.program == "SDM"):
-            df = get_sdm_csv_for_imaging(input[1])
-        elif(wildcards.program == "FoldX"):
-            df = get_foldx_csv_for_imaging(input[1])
-        elif(wildcards.program == "SIFT"):
-            df = get_sift_csv_for_imaging(input[1])
-        elif(wildcards.program == "ESM"):
-            df = get_esm_csv_for_imaging(input[1])
-        
-        # Check if there is a wildcard for the suffix
-        try:
-            suffix = wildcards.suffix
-        except:
-            suffix = ""
-        
-        # If the df type is the type of None
-        if type(df) == type(None):
-            # TODO: Add log here
-            # Patrameterize the resource path
-            source_file = os.path.join(os.path.dirname(os.path.realpath(__name__)), "resources", "noimg.png")
-            # Copy the noimg.png to the destiny
-            mutafs.cp(source_file, output[0])
-            # Finish this rule execution
-            return None
-        
-        # Create the images
-        generate_pdb_image(
-                input[0],
-                wildcards.filename,
-                wildcards.program,
-                df,
-                wildcards.outdir + "/" + wildcards.filename + "/images",
-                suffix = suffix,
-                n_rotations = params.n_rotations,
-                generateGif = params.generateGif,
-                total_duration = params.total_duration,
-                protein_color = params.protein_color,
-                missing_data_color = params.missing_data_color,
-                multiple_mutation_color_min = params.multiple_mutation_color_min,
-                multiple_mutation_color_max = params.multiple_mutation_color_max,
-                location = params.location
+        import OCDocker.PLANTS as ocplants
+
+        # Set the base paths
+        baseLigPath = os.path.dirname(input.ligand)
+
+        # Set the boxFile
+        boxFile = f"{baseLigPath}/boxes/box0.pdb"
+        confFile = f"{baseLigPath}/{wildcards.target}/plantsFiles/conf_plants.txt"
+
+        # Set the prepared receptor file name
+        # prepared_receptor = "{wildcards.database}/{wildcards.pdbbind_target}/prepared_receptor.mol2",
+
+        # If there is no box, finish the rule
+        if not os.path.exists(boxFile):
+            return ocerror.Error.file_not_exists(
+                f"Box file '{boxFile}' does not exist.", ocerror.ReportLevel.ERROR
             )
+
+            # Create the Receptor object
+        plants_receptor = ocr.Receptor(
+            input.receptor, relativeASAcutoff=0.7, name=f"{wildcards.pdbbind_target}"
+        )
+        plants_ligand = ocl.Ligand(input.ligand, name=f"{wildcards.target}")
+
+        # Create the PLANTS object
+        plants_obj = ocplants.PLANTS(
+            confFile,
+            boxFile,
+            plants_receptor,
+            output.prepared_receptor,
+            plants_ligand,
+            output.prepared_ligand,
+            f"{baseLigPath}/{wildcards.target}/plantsFiles/{wildcards.target}.log",
+            f"{baseLigPath}/{wildcards.target}/plantsFiles",
+            name=f"PLANTS {wildcards.pdbbind_target}-{wildcards.target}",
+        )
+
+        # Check if there is already a prepared receptor file
+        if not os.path.exists(output.prepared_receptor):
+            # Prepare the receptor
+            plants_obj.prepare_receptor()
+
+            # Prepare the ligand
+        plantsTest.run_prepare_ligand()
+
+        # Run PLANTS
+        plantsTest.run_docking()
+
+        # Get the docking poses
+        plantsdockingPoses = plantsTest.get_docked_poses()
+
+        print(plantsdockingPoses)

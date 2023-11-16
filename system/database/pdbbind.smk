@@ -36,30 +36,10 @@ import sys
 sys.path.append("/data/hd4tb/OCDocker/OCDocker")
 from OCDocker.Initialise import *
 
-# Parameterise the pdbbind database index path from the config file
-pdbbind_database_index_path = config["pdb_database_index"]
+import OCDP.preload as OCDPpre
 
-# If the pdb_database_index file exists
-if os.path.isfile(pdbbind_database_index_path):
-    # Open the file
-    with open(pdbbind_database_index_path, "r") as f:
-        # Read the pdbbind database indexes from the specified file in the config file
-        pdbbind_targets = list(set(line.strip() for line in f if line.strip()))
-else:
-    sys.exit("The pdb_database_index file does not exist. Please, check the config file.")
+pdbbind_targets = OCDPpre.preload_PDBBind(config["pdb_database_index"], config["ignored_pdb_database_index"])
 
-# Parameterise the ignored pdbbind database index path from the config file
-ignored_pdbbind_database_index_path = config["ignored_pdb_database_index"]
-
-# If the ignored_pdb_database_index file exists
-if os.path.isfile(ignored_pdbbind_database_index_path):
-    # Open the file
-    with open(ignored_pdbbind_database_index_path, "r") as f:
-        # Read the ignored pdbbind database indexes from the specified file in the config file
-        ignored_pdbbind_targets = [line.strip() for line in f if line.strip()]
-    
-    # Remove from the pdbbind_targets list the ignored pdbbind database indexes
-    pdbbind_targets = [x for x in pdbbind_targets if x not in ignored_pdbbind_targets]
 
 # Rules
 ###############################################################################
@@ -74,9 +54,6 @@ rule update_PDBBind:
         snakemake all --cores 12 --use-conda --keep-going --conda-frontend mamba
     """
     input:
-        #dudezDir=dudez_archive, # Needed for the DUDEz database
-        #logDir=config["logDir"], # Needed for the log files
-        #dbbindDir = pdbbind_archive, # Needed for the PDBbind database
         tmpFile = expand("/tmp/ocdocker/{pdbbind_target}", pdbbind_target = pdbbind_targets),
     run:
         # Remove sentinel files
