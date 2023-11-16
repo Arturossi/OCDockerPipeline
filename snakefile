@@ -22,7 +22,8 @@ from OCDocker.Initialise import *
 # Program imports
 ###############################################################################
 include: "system/fileSystem.smk"
-include: "system/database/pdbbind.smk"
+#include: "system/database/pdbbind.smk"
+include: "system/database/dudez.smk"
 
 
 # Python definitions
@@ -81,4 +82,4 @@ This project is licensed under the GNU General Public License v3.0
 
 rule all:
     input:
-        expand("{output}/", output=config["output"])
+        "/tmp/ocdocker/dudez_complete.sentinel"

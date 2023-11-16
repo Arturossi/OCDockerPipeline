@@ -34,7 +34,6 @@ This project is licensed under the GNU General Public License v3.0
 import sys
 sys.path.append("/data/hd4tb/OCDocker/OCDocker")
 from OCDocker.Initialise import *
-import OCDocker.Toolbox.Downloading as ocdown
 from typing import List
 
 def get_targets(file: str) -> List[str]:
@@ -46,6 +45,7 @@ if os.path.isfile(config["dudez_database_index"]):
     # Get the targets
     dudez_targets = get_targets(config["dudez_database_index"])
 else:
+    import OCDocker.Toolbox.Downloading as ocdown
     # Download the benchmark grids indexes
     ocdown.download_url(f"{dudez_download}/DUDE-Z-benchmark-grids/DUDE-Z_targets", "tmp/DUDE-Z_targets")
     # Get the targets
@@ -67,6 +67,8 @@ rule update_DUDEz:
     """
     input:
         tmpFile = expand("/tmp/ocdocker/{dudez_target}", dudez_target = dudez_targets),
+    output:
+        dudez_complete = temp(touch("/tmp/ocdocker/dudez_complete.sentinel")),
     run:
         # Remove sentinel files
         for file in os.listdir("tmp"):
@@ -92,7 +94,6 @@ rule process_DUDEz:
         dudez_log = config["logDir"] + "/dudez.log",
     input:
         dudez_receptor = dudez_archive + "/{dudez_target}/receptor.pdb",
-        dudez_ligand = dudez_archive + "/{dudez_target}/compounds/ligands/ligand/ligand.smi",
     output:
         tmpFile = temp(touch("/tmp/ocdocker/{dudez_target}")),
     run:
@@ -103,16 +104,6 @@ rule process_DUDEz:
         if not os.path.isfile(input.dudez_receptor):
             # Set the error string
             error_string += f" is missing receptor"
-
-        # Check if the ligand exists
-        if not os.path.isfile(input.dudez_ligand):
-            # If the error string is empty
-            if error_string == "":
-                # Set the error string
-                error_string += f" is missing ligand"
-            else:
-                # Set the error string
-                error_string += f" and ligand"
 
         # If the folder has incomplete data
         if error_string:
@@ -133,18 +124,23 @@ rule download_process_DUDEz:
     """
     output:
         receptor = dudez_archive + "/{target}/receptor.pdb",
-        ligand = dudez_archive + "/{target}/compounds/ligands/ligand/ligand.smi",
+        #ligand = dudez_archive + "/{target}/compounds/ligands/{ligand_id}/ligand.smi",
+        #decoy = dudez_archive + "/{target}/compounds/decoys/{decoy_id}/ligand.smi",
     #conda:
     #    "../../envs/ocdocker.yaml"
     threads: 1
     run:
+        import OCDocker.Toolbox.Conversion as occonversion
+        import OCDocker.Toolbox.Downloading as ocdown
+        import OCDocker.Toolbox.FilesFolders as ocff
+
         if wildcards.target == "D4":
             ptn_target = "DRD4"
         else:
             ptn_target = wildcards.target
 
         # Create a folder for the target in the archive
-        _ = ocff.safe_create_dir(f"{dudez_archive}/{ptn_target}")
+        #_ = ocff.safe_create_dir(f"{dudez_archive}/{ptn_target}")
 
         # Check if the target receptor does not exists or the user wants to overwrite it
         if not os.path.isfile(f"{dudez_archive}/{ptn_target}/receptor.pdb") or overwrite:
@@ -159,15 +155,15 @@ rule download_process_DUDEz:
         # Check if the target dudez ligands does not exists or the user wants to overwrite it
         if not os.path.isfile(f"{dudez_archive}/{ptn_target}/ligands.smi") or overwrite:
             # Download the dudeZ ligands
-            ocdown.download_url(f"{dudez_download}/DUDE-Z-benchmark-grids/{target}/ligands.smi", f"{dudez_archive}/{ptn_target}/ligands.smi")
+            ocdown.download_url(f"{dudez_download}/DUDE-Z-benchmark-grids/{wildcards.target}/ligands.smi", f"{dudez_archive}/{ptn_target}/ligands.smi")
 
         # Check if the target dudez decoys does not exists or the user wants to overwrite it
         if not os.path.isfile(f"{dudez_archive}/{ptn_target}/decoys.smi") or overwrite:
             # Download the dudeZ ligands
-            ocdown.download_url(f"{dudez_download}/DUDE-Z-benchmark-grids/{target}/decoys.smi", f"{dudez_archive}/{ptn_target}/decoys.smi")
+            ocdown.download_url(f"{dudez_download}/DUDE-Z-benchmark-grids/{wildcards.target}/decoys.smi", f"{dudez_archive}/{ptn_target}/decoys.smi")
         
         # Parameterize the compounds path
-        targetc = os.path.join(target, "compounds")
+        targetc = os.path.join(dudez_archive, wildcards.target, "compounds")
 
         # Create the compound folder (will hold all compounds, no matter if they are ligand or decoy)
         _ = ocff.safe_create_dir(targetc)
@@ -180,7 +176,7 @@ rule download_process_DUDEz:
             # Create the ligands folder
             _ = ocff.safe_create_dir(f"{targetc}/{data}")
             # Process the ligands, splitting them into the multiple files
-            with open(f"{target}/{data}.smi", 'r') as f:
+            with open(os.path.join(dudez_archive, wildcards.target, f"{data}.smi"), 'r') as f:
                 for line in f:
                     # Get the smiles and name of the ligand
                     smiles, name = line.split()
@@ -200,5 +196,4 @@ rule download_process_DUDEz:
                         with open(f"{targetc}/{data}/{name}/ligand.smi", 'w') as f:
                             f.write(f"{smiles}")
                     else:
-                        ocerror.Error.file_exists(f"File '{targetc}/{data}/{name}/ligand.mol2' already exists. Skipping...", level = ocerror.Error.ReportLevel.WARNING)
-        
+                        ocerror.Error.file_exists(f"File '{targetc}/{data}/{name}/ligand.mol2' already exists. Skipping...", level = ocerror.ReportLevel.WARNING)
