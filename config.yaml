@@ -1,5 +1,6 @@
 # Workflow settings
 cpu_cores: 18
+overwrite: false
 
 # Logging settings
 logprefix: ""

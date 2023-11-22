@@ -51,37 +51,42 @@ rule runPLANTS:
     """
     params:
         plants_log=config["logDir"] + "/plants.log",
-    input:
-        ligand="{database}/{pdbbind_target}/compounds/{kind}/{target}/ligand.smi",
     output:
-        prepared_receptor = "{database}/{pdbbind_target}/compounds/{kind}/{target}/prepared_receptor.mol2",
-        prepared_ligand = "{database}/{pdbbind_target}/compounds/{kind}/{target}/plantsFiles/run/prepared_ligand.mol2",
-        plants_output = "{database}/{pdbbind_target}/compounds/{kind}/{target}/plantsFiles/run/prepared_ligand_entry_00001_conf_01.mol2",
+        prepared_receptor = "{database}/{receptor}/compounds/{kind}/{target}/prepared_receptor.mol2",
+        prepared_ligand = "{database}/{receptor}/compounds/{kind}/{target}/plantsFiles/prepared_ligand.mol2",
+        plants_output = "{database}/{receptor}/compounds/{kind}/{target}/plantsFiles/run/prepared_ligand_entry_00001_conf_01.mol2",
     threads: 1
     run:
-        import OCDocker.PLANTS as ocplants
+        import OCDocker.Docking.PLANTS as ocplants
+        import OCDocker.Receptor as ocr
+        import OCDocker.Ligand as ocl
+        import shutil
+
+        # If the run folder exists
+        if os.path.exists(os.path.join(wildcards.database, wildcards.receptor, "compounds", wildcards.kind, wildcards.target, "plantsFiles", "run")):
+            shutil.rmtree(os.path.join(wildcards.database, wildcards.receptor, "compounds", wildcards.kind, wildcards.target, "plantsFiles", "run"))
+
+        ligand = os.path.join(wildcards.database, wildcards.receptor, "compounds", wildcards.kind, wildcards.target, "ligand.smi")
+        receptor = os.path.join(wildcards.database, wildcards.receptor, "receptor.pdb")
 
         # Set the base paths
-        baseLigPath = os.path.dirname(input.ligand)
+        baseLigPath = os.path.dirname(ligand)
 
         # Set the boxFile
         boxFile = f"{baseLigPath}/boxes/box0.pdb"
-        confFile = f"{baseLigPath}/{wildcards.target}/plantsFiles/conf_plants.txt"
-
-        # Set the prepared receptor file name
-        # prepared_receptor = "{wildcards.database}/{wildcards.pdbbind_target}/prepared_receptor.mol2",
+        confFile = os.path.join(baseLigPath, "plantsFiles", "conf_plants.txt")
 
         # If there is no box, finish the rule
         if not os.path.exists(boxFile):
-            return ocerror.Error.file_not_exists(
+            return ocerror.Error.file_not_exist(
                 f"Box file '{boxFile}' does not exist.", ocerror.ReportLevel.ERROR
             )
 
-            # Create the Receptor object
+        # Create the Receptor object
         plants_receptor = ocr.Receptor(
-            input.receptor, relativeASAcutoff=0.7, name=f"{wildcards.pdbbind_target}"
+            receptor, relativeASAcutoff = 0.7, name = wildcards.receptor
         )
-        plants_ligand = ocl.Ligand(input.ligand, name=f"{wildcards.target}")
+        plants_ligand = ocl.Ligand(ligand, name = wildcards.target)
 
         # Create the PLANTS object
         plants_obj = ocplants.PLANTS(
@@ -91,23 +96,23 @@ rule runPLANTS:
             output.prepared_receptor,
             plants_ligand,
             output.prepared_ligand,
-            f"{baseLigPath}/{wildcards.target}/plantsFiles/{wildcards.target}.log",
-            f"{baseLigPath}/{wildcards.target}/plantsFiles",
-            name=f"PLANTS {wildcards.pdbbind_target}-{wildcards.target}",
+            os.path.join(baseLigPath, "plantsFiles", wildcards.target + ".log"),
+            os.path.join(baseLigPath, "plantsFiles"),
+            name = "PLANTS " + wildcards.receptor + "-" + wildcards.target,
         )
 
         # Check if there is already a prepared receptor file
         if not os.path.exists(output.prepared_receptor):
             # Prepare the receptor
-            plants_obj.prepare_receptor()
+            plants_obj.run_prepare_receptor()
 
-            # Prepare the ligand
-        plantsTest.run_prepare_ligand()
+        # Prepare the ligand
+        plants_obj.run_prepare_ligand()
 
         # Run PLANTS
-        plantsTest.run_docking()
+        plants_obj.run_docking()
 
         # Get the docking poses
-        plantsdockingPoses = plantsTest.get_docked_poses()
+        plantsdockingPoses = plants_obj.get_docked_poses()
 
         print(plantsdockingPoses)

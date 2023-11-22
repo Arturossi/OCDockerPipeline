@@ -38,7 +38,7 @@ from OCDocker.Initialise import *
 
 import OCDP.preload as OCDPpre
 
-pdbbind_targets = OCDPpre.preload_PDBBind(config["pdb_database_index"], config["ignored_pdb_database_index"])
+#pdbbind_targets = OCDPpre.preload_PDBBind(config["pdb_database_index"], config["ignored_pdb_database_index"])
 
 
 # Rules

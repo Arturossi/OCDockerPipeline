@@ -1,2 +1,3 @@
 .snakemake
 tmp/*
+nohup.out

@@ -34,7 +34,7 @@ pdbbind_targets = OCDPpre.preload_PDBbind(pdb_database_index, config["ignored_pd
 # Program imports
 ###############################################################################
 include: "system/fileSystem.smk"
-#include: "system/database/pdbbind.smk"
+include: "system/database/pdbbind.smk"
 #include: "system/database/dudez.smk"
 include: "docking/plants.smk"
 
@@ -65,6 +65,14 @@ zip_output = False              # Zip the output files
 update = False                  # Update the pipeline
 overwrite = False               # Overwrite the output files
 
+def find_mols(wildcards):
+    """
+    Find the molecules from the desired database.
+    """
+    
+    return ["tmp/" + wildcards.database + "!x!" + wildcards.receptor + "!x!" + wildcards.kind + "!x!" + os.path.basename(target) for target in glob(ocdb_path + "/" + wildcards.database + "/" + wildcards.receptor + "/compounds/" + wildcards.kind + "/*")]
+
+
 # Wildcards
 ###############################################################################
 
@@ -88,26 +96,47 @@ This project is licensed under the GNU General Public License v3.0
 
 rule db_pdbbind:
     """
-    Download the PDBbind database.
+    Set up the PDBbind database.
     """
+    input:
+        expand(ocdb_path + "/PDBbind/{pdbbind_target}/receptor.pdb",
+            pdbbind_target = pdbbind_targets,
+        ),
+
+
+rule run_dockings_flag:
+    """
+    Run the docking software.
+    """
+    input:
+        plants_output = ocdb_path + "/{database}/{receptor}/compounds/{kind}/{target}/plantsFiles/run/prepared_ligand_entry_00001_conf_01.mol2",
     output:
-        pdbbind_archive,
-    output:
-        ocdb_path + "/PDBbind/{pdbbind_target}/compounds/ligands/{target}/ligand.mol2",
+        temp(touch("tmp/{database}!x!{receptor}!x!{kind}!x!{target}")),
     run:
-        print(input.pdbbind_targets)
+        print("{wildcards.database}/{wildcards.receptor}/compounds/{wildcards.kind}/{wildcards.target}/plantsFiles/run/prepared_ligand_entry_00001_conf_01.mol2")
+
+rule GetLigands:
+    """
+    Discover the ligands from the desired database.
+    """
+    input:
+        ligands = find_mols
+    output:
+        temp(touch("tmp/{database}!-!{receptor}!-!{kind}")),
+    run:
+        print(input.ligands)
 
 rule all:
     """
     Prepare the input files for PLANTS docking software.
+
+    Usage:
+        snakemake all --cores 20 --use-conda --conda-frontend mamba --keep-going --wms-monitor http://127.0.0.1:5000
     """
     input:
-        plants_result = expand(
-                ocdb_path + "/{database}/{pdbbind_target}/compounds/{kind}/{target}/plantsFiles/run/prepared_ligand_entry_00001_conf_01.mol2",
-                database = ["PDBbind"], 
-                pdbbind_target = pdbbind_targets, 
-                kind = ["ligands", "decoys"],
-                target = [os.path.basename(x) for x in glob(ocdb_path + "/{database}/{pdbbind_target}/compounds/{kind}/*")],
-            ),
-    run:
-        print(input.plants_result)
+        allkinds = expand(
+            "tmp/{database}!-!{receptor}!-!{kind}",
+            database = ["PDBbind"], 
+            receptor = pdbbind_targets, 
+            kind = ["ligands", "decoys", "compounds"],
+        ),
