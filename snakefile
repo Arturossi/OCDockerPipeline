@@ -37,6 +37,7 @@ include: "system/fileSystem.smk"
 include: "system/database/pdbbind.smk"
 #include: "system/database/dudez.smk"
 include: "docking/plants.smk"
+include: "docking/vina.smk"
 
 
 # Python definitions
@@ -109,7 +110,8 @@ rule run_dockings_flag:
     Run the docking software.
     """
     input:
-        plants_output = ocdb_path + "/{database}/{receptor}/compounds/{kind}/{target}/plantsFiles/run/prepared_ligand_entry_00001_conf_01.mol2",
+        #plants_output = ocdb_path + "/{database}/{receptor}/compounds/{kind}/{target}/plantsFiles/run/prepared_ligand_entry_00001_conf_01.mol2",
+        vina_output = ocdb_path + "{database}/{receptor}/compounds/{kind}/{target}/vinaFiles/ligand_split_1.pdbqt"
     output:
         temp(touch("tmp/{database}!x!{receptor}!x!{kind}!x!{target}")),
     run:

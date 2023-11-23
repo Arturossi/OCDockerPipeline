@@ -1,7 +1,7 @@
 """
 Module name: plants
 
-This module contains a set of Snakemake rules to run the PLANTS docking
+This module contains a set of Snakemake rules to run the Vina docking
 software.
 Author: Artur Duque Rossi
 
@@ -39,42 +39,38 @@ This project is licensed under the GNU General Public License v3.0
 ###############################################################################
 
 
-rule runPLANTS:
+rule runVina:
     """
-    Run PLANTS docking software.
+    Run Vina docking software.
 
     Inputs:
         (file): The prepared ligand file.
         (file): The prepared receptor file.
     Outputs:
-        (file): The PLANTS output file.
+        (file): The Vina output file.
     """
     params:
-        plants_log=config["logDir"] + "/plants.log",
+        vina_log=config["logDir"] + "/vina.log",
     output:
-        prepared_receptor = "{database}/{receptor}/compounds/{kind}/{target}/prepared_receptor.mol2",
-        prepared_ligand = "{database}/{receptor}/compounds/{kind}/{target}/plantsFiles/prepared_ligand.mol2",
-        plants_output = "{database}/{receptor}/compounds/{kind}/{target}/plantsFiles/run/prepared_ligand_entry_00001_conf_01.mol2",
+        prepared_receptor = "{database}/{receptor}/compounds/{kind}/{target}/prepared_receptor.pdbqt",
+        prepared_ligand = "{database}/{receptor}/compounds/{kind}/{target}/prepared_ligand.pdbqt",
+        vina_output = "{database}/{receptor}/compounds/{kind}/{target}/vinaFiles/ligand_split_1.pdbqt",
     threads: 1
     run:
-        import OCDocker.Docking.PLANTS as ocplants
+        import OCDocker.Docking.vina as ocvina
         import OCDocker.Receptor as ocr
         import OCDocker.Ligand as ocl
-        import shutil
 
-        # If the run folder exists
-        if os.path.exists(os.path.join(wildcards.database, wildcards.receptor, "compounds", wildcards.kind, wildcards.target, "plantsFiles", "run")):
-            shutil.rmtree(os.path.join(wildcards.database, wildcards.receptor, "compounds", wildcards.kind, wildcards.target, "plantsFiles", "run"))
-
-        ligand = os.path.join(wildcards.database, wildcards.ligand, "compounds", wildcards.kind, wildcards.target, "ligand.smi")
-        receptor = os.path.join(wildcards.database, wildcards.receptor, "receptor.pdb")
+        # Create ligand and receptor objects
+        vina_ligand = os.path.join(wildcards.database, wildcards.ligand, "compounds", wildcards.kind, wildcards.target, "ligand.smi")
+        vina_receptor = os.path.join(wildcards.database, wildcards.receptor, "receptor.pdb")
 
         # Set the base paths
         baseLigPath = os.path.dirname(ligand)
 
         # Set the boxFile
         boxFile = f"{baseLigPath}/boxes/box0.pdb"
-        confFile = os.path.join(baseLigPath, "plantsFiles", "conf_plants.txt")
+        confFile = os.path.join(baseLigPath, "vinaFiles", "conf_vina.txt")
 
         # If there is no box, finish the rule
         if not os.path.exists(boxFile):
@@ -82,39 +78,35 @@ rule runPLANTS:
                 f"Box file '{boxFile}' does not exist.", ocerror.ReportLevel.ERROR
             )
 
-        # Create the Receptor object
-        plants_receptor = ocr.Receptor(
-            receptor, relativeASAcutoff = 0.7, name = wildcards.receptor
-        )
-        plants_ligand = ocl.Ligand(ligand, name = wildcards.target)
-
-        # Create the PLANTS object
-        plants_obj = ocplants.PLANTS(
+        # Create the Vina object
+        vina_obj = ocvina.Vina(
             confFile,
             boxFile,
-            plants_receptor,
+            vina_receptor,
             output.prepared_receptor,
-            plants_ligand,
+            vina_ligand,
             output.prepared_ligand,
-            os.path.join(baseLigPath, "plantsFiles", wildcards.target + ".log"),
-            os.path.join(baseLigPath, "plantsFiles"),
-            name = "PLANTS " + wildcards.receptor + "-" + wildcards.target,
-        )
+            f"{baseLigPath}/vinaFiles/" + wildcards.target + ".log",
+            f"{baseLigPath}/vinaFiles/" + wildcards.target + ".pdbqt",
+            name = f"Vina " + wildcards.receptor + "-" + wildcards.target)
 
         # Check if there is already a prepared receptor file
         if not os.path.exists(output.prepared_receptor):
             # Prepare the receptor
-            plants_obj.run_prepare_receptor()
+            vina_obj.run_prepare_receptor()
 
         # Check if there is already a prepared ligand file
         if not os.path.exists(output.prepared_ligand):
             # Prepare the ligand
-            plants_obj.run_prepare_ligand()
+            vina_obj.run_prepare_ligand()
 
-        # Run PLANTS
-        plants_obj.run_docking()
+        # Run Vina
+        vina_obj.run_docking()
+
+        # Split the docking results into multiple files
+        vina_obj.split_poses(f"{baseLigPath}/vinaFiles", logFile = "")
 
         # Get the docking poses
-        plantsdockingPoses = plants_obj.get_docked_poses()
+        vinaDockingPoses = vina_obj.get_docked_poses()
 
-        print(plantsdockingPoses)
+        print(vinaDockingPoses)

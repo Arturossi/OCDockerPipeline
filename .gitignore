@@ -1,3 +1,4 @@
 .snakemake
 tmp/*
 nohup.out
+*_bad.mol2
