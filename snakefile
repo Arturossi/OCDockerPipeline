@@ -115,7 +115,7 @@ rule run_dockings_flag:
     output:
         temp(touch("tmp/{database}!x!{receptor}!x!{kind}!x!{target}")),
     run:
-        print("{wildcards.database}/{wildcards.receptor}/compounds/{wildcards.kind}/{wildcards.target}/plantsFiles/run/prepared_ligand_entry_00001_conf_01.mol2")
+        print(os.path.join(wildcards.database, wildcards.receptor, "compounds", wildcards.kind, wildcards.target, "plantsFiles", "run","prepared_ligand_entry_00001_conf_01.mol2"))
 
 rule GetLigands:
     """
