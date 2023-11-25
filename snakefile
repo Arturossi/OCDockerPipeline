@@ -111,7 +111,7 @@ rule run_dockings_flag:
     """
     input:
         #plants_output = ocdb_path + "/{database}/{receptor}/compounds/{kind}/{target}/plantsFiles/run/prepared_ligand_entry_00001_conf_01.mol2",
-        vina_output = ocdb_path + "{database}/{receptor}/compounds/{kind}/{target}/vinaFiles/ligand_split_1.pdbqt"
+        vina_output = ocdb_path + "/{database}/{receptor}/compounds/{kind}/{target}/vinaFiles/ligand_split_1.pdbqt"
     output:
         temp(touch("tmp/{database}!x!{receptor}!x!{kind}!x!{target}")),
     run:

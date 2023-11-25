@@ -57,13 +57,13 @@ rule runVina:
         vina_output = "{database}/{receptor}/compounds/{kind}/{target}/vinaFiles/ligand_split_1.pdbqt",
     threads: 1
     run:
-        import OCDocker.Docking.vina as ocvina
+        import OCDocker.Docking.Vina as ocvina
         import OCDocker.Receptor as ocr
         import OCDocker.Ligand as ocl
 
         # Create ligand and receptor objects
-        vina_ligand = os.path.join(wildcards.database, wildcards.ligand, "compounds", wildcards.kind, wildcards.target, "ligand.smi")
-        vina_receptor = os.path.join(wildcards.database, wildcards.receptor, "receptor.pdb")
+        ligand = os.path.join(wildcards.database, wildcards.receptor, "compounds", wildcards.kind, wildcards.target, "ligand.smi")
+        receptor = os.path.join(wildcards.database, wildcards.receptor, "receptor.pdb")
 
         # Set the base paths
         baseLigPath = os.path.dirname(ligand)
@@ -71,6 +71,13 @@ rule runVina:
         # Set the boxFile
         boxFile = f"{baseLigPath}/boxes/box0.pdb"
         confFile = os.path.join(baseLigPath, "vinaFiles", "conf_vina.txt")
+
+        # Create the Receptor object
+        vina_receptor = ocr.Receptor(
+            receptor, relativeASAcutoff = 0.7, name = wildcards.receptor
+        )
+        vina_ligand = ocl.Ligand(ligand, name = wildcards.target)
+
 
         # If there is no box, finish the rule
         if not os.path.exists(boxFile):
