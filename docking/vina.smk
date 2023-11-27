@@ -52,7 +52,6 @@ rule runVina:
     params:
         vina_log=config["logDir"] + "/vina.log",
     output:
-        prepared_receptor = "{database}/{receptor}/compounds/{kind}/{target}/prepared_receptor.pdbqt",
         prepared_ligand = "{database}/{receptor}/compounds/{kind}/{target}/prepared_ligand.pdbqt",
         vina_output = "{database}/{receptor}/compounds/{kind}/{target}/vinaFiles/ligand_split_1.pdbqt",
     threads: 1
@@ -72,6 +71,8 @@ rule runVina:
         boxFile = f"{baseLigPath}/boxes/box0.pdb"
         confFile = os.path.join(baseLigPath, "vinaFiles", "conf_vina.txt")
 
+        prepared_receptor = os.path.join(wildcards.database, wildcards.receptor, "prepared_receptor.pdbqt")
+
         # Create the Receptor object
         vina_receptor = ocr.Receptor(
             receptor, relativeASAcutoff = 0.7, name = wildcards.receptor
@@ -90,7 +91,7 @@ rule runVina:
             confFile,
             boxFile,
             vina_receptor,
-            output.prepared_receptor,
+            prepared_receptor,
             vina_ligand,
             output.prepared_ligand,
             f"{baseLigPath}/vinaFiles/" + wildcards.target + ".log",
@@ -98,7 +99,7 @@ rule runVina:
             name = f"Vina " + wildcards.receptor + "-" + wildcards.target)
 
         # Check if there is already a prepared receptor file
-        if not os.path.exists(output.prepared_receptor):
+        if not os.path.exists(prepared_receptor):
             # Prepare the receptor
             vina_obj.run_prepare_receptor()
 

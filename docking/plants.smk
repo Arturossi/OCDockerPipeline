@@ -52,8 +52,7 @@ rule runPLANTS:
     params:
         plants_log=config["logDir"] + "/plants.log",
     output:
-        prepared_receptor = "{database}/{receptor}/compounds/{kind}/{target}/prepared_receptor.mol2",
-        prepared_ligand = "{database}/{receptor}/compounds/{kind}/{target}/plantsFiles/prepared_ligand.mol2",
+        prepared_ligand = "{database}/{receptor}/compounds/{kind}/{target}/prepared_ligand.mol2",
         plants_output = "{database}/{receptor}/compounds/{kind}/{target}/plantsFiles/run/prepared_ligand_entry_00001_conf_01.mol2",
     threads: 1
     run:
@@ -66,7 +65,7 @@ rule runPLANTS:
         if os.path.exists(os.path.join(wildcards.database, wildcards.receptor, "compounds", wildcards.kind, wildcards.target, "plantsFiles", "run")):
             shutil.rmtree(os.path.join(wildcards.database, wildcards.receptor, "compounds", wildcards.kind, wildcards.target, "plantsFiles", "run"))
 
-        ligand = os.path.join(wildcards.database, wildcards.ligand, "compounds", wildcards.kind, wildcards.target, "ligand.smi")
+        ligand = os.path.join(wildcards.database, wildcards.receptor, "compounds", wildcards.kind, wildcards.target, "ligand.smi")
         receptor = os.path.join(wildcards.database, wildcards.receptor, "receptor.pdb")
 
         # Set the base paths
@@ -75,6 +74,9 @@ rule runPLANTS:
         # Set the boxFile
         boxFile = f"{baseLigPath}/boxes/box0.pdb"
         confFile = os.path.join(baseLigPath, "plantsFiles", "conf_plants.txt")
+
+        # Set the input receptor variable
+        prepared_receptor = os.path.join(wildcards.database, wildcards.receptor, "prepared_receptor.mol2")
 
         # If there is no box, finish the rule
         if not os.path.exists(boxFile):
@@ -93,7 +95,7 @@ rule runPLANTS:
             confFile,
             boxFile,
             plants_receptor,
-            output.prepared_receptor,
+            prepared_receptor,
             plants_ligand,
             output.prepared_ligand,
             os.path.join(baseLigPath, "plantsFiles", wildcards.target + ".log"),
@@ -102,7 +104,7 @@ rule runPLANTS:
         )
 
         # Check if there is already a prepared receptor file
-        if not os.path.exists(output.prepared_receptor):
+        if not os.path.exists(prepared_receptor):
             # Prepare the receptor
             plants_obj.run_prepare_receptor()
 
