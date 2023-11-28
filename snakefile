@@ -28,7 +28,7 @@ import OCDP.preload as OCDPpre
 
 pdb_database_index = config["pdb_database_index"]
 
-pdbbind_targets = OCDPpre.preload_PDBbind(pdb_database_index, config["ignored_pdb_database_index"])[:1]
+pdbbind_targets = OCDPpre.preload_PDBbind(pdb_database_index, config["ignored_pdb_database_index"])[:5]
 
 
 # Program imports
@@ -158,6 +158,10 @@ rule run_rescoring:
             # Get the medoids (The plot is just for visualization, it is not required)
             medoids = ocrmsdclust.get_medoids(rmsdMatrix, clusters, onlyBiggest = True) # type: ignore
 
+            # If there is no medoid, return
+            if len(medoids) == 0:
+                return
+
             # Create the processed_Medoids dict
             processedMedoids = {
                     "plants" : [],
@@ -280,7 +284,6 @@ rule run_rescoring:
                 plantsRescoringResult[sf] = ocplants.read_rescore_logs(f"{plants_parent_base_dir}/run_{sf}/ranking.csv")
             
             print({'vina': vinaRescoringResult, 'smina': sminaRescoringResult, 'plants': plantsRescoringResult, 'oddt': ocoddt.df_to_dict(df)})
-
 
 rule GetLigands:
     """
