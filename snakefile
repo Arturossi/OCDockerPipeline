@@ -113,6 +113,7 @@ rule run_rescoring:
         vina_output = ocdb_path + "/{database}/{receptor}/compounds/{kind}/{target}/vinaFiles/ligand_split_1.pdbqt"
     output:
         temp(touch("tmp/{database}!x!{receptor}!x!{kind}!x!{target}")),
+    threads: 1
     run:
         # Test if the output files exists
         if os.path.isfile(input.plants_output) and os.path.isfile(input.vina_output):
@@ -263,7 +264,7 @@ rule run_rescoring:
             ## Run ODDT rescoring   #
             #########################
 
-            df = ocoddt.run_oddt(preparedReceptor, medoids, wildcards.target, f"{basePath}/oddt") # type: ignore
+            #df = ocoddt.run_oddt(preparedReceptor, medoids, wildcards.target, f"{basePath}/oddt") # type: ignore
 
             ##############################
             ## Get the rescoring results #
@@ -283,7 +284,7 @@ rule run_rescoring:
                 # Read the rescoring results and save it in the dictionary
                 plantsRescoringResult[sf] = ocplants.read_rescore_logs(f"{plants_parent_base_dir}/run_{sf}/ranking.csv")
             
-            print({'vina': vinaRescoringResult, 'smina': sminaRescoringResult, 'plants': plantsRescoringResult, 'oddt': ocoddt.df_to_dict(df)})
+            print({'vina': vinaRescoringResult, 'smina': sminaRescoringResult, 'plants': plantsRescoringResult})#, 'oddt': ocoddt.df_to_dict(df)})
 
 rule GetLigands:
     """
