@@ -117,6 +117,9 @@ rule run_rescoring:
     run:
         # Test if the output files exists
         if os.path.isfile(input.plants_output) and os.path.isfile(input.vina_output):
+            # To fix Loky backend issue
+            from joblib import parallel_backend
+
             # Import the libraries
             import OCDocker.Docking.PLANTS as ocplants
             import OCDocker.Docking.Smina as ocsmina
@@ -264,7 +267,9 @@ rule run_rescoring:
             ## Run ODDT rescoring   #
             #########################
 
-            #df = ocoddt.run_oddt(preparedReceptor, medoids, wildcards.target, f"{basePath}/oddt") # type: ignore
+            # Use the threading backend context manager instead of the Loky backend
+            with parallel_backend("threading"):
+                df = ocoddt.run_oddt(preparedReceptor, medoids, wildcards.target, f"{basePath}/oddt") # type: ignore
 
             ##############################
             ## Get the rescoring results #
