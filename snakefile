@@ -108,6 +108,8 @@ rule run_rescoring:
     """
     Run the rescoring of the poses from all docking software.
     """
+    params:
+        joblib_backend = config["joblib_backend"],
     input:
         plants_output = ocdb_path + "/{database}/{receptor}/compounds/{kind}/{target}/plantsFiles/run/prepared_ligand_entry_00001_conf_01.mol2",
         vina_output = ocdb_path + "/{database}/{receptor}/compounds/{kind}/{target}/vinaFiles/ligand_split_1.pdbqt"
@@ -268,8 +270,8 @@ rule run_rescoring:
             #########################
 
             # Use the threading backend context manager instead of the Loky backend
-            with parallel_backend("threading"):
-                df = ocoddt.run_oddt(preparedReceptor, medoids, wildcards.target, f"{basePath}/oddt") # type: ignore
+            #with parallel_backend(params.joblib_backend, n_jobs = available_cores):
+            #    df = ocoddt.run_oddt(preparedReceptor, medoids, wildcards.target, f"{basePath}/oddt") # type: ignore
 
             ##############################
             ## Get the rescoring results #

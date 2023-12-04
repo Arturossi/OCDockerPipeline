@@ -1,6 +1,9 @@
 # Workflow settings
-cpu_cores: 18
+cpu_cores: 16
 overwrite: false
+
+# Joblib settings
+joblib_backend: "threading"  # Options: "loky", "multiprocessing", "threading"
 
 # Logging settings
 logprefix: ""
