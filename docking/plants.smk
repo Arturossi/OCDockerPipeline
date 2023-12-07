@@ -59,7 +59,11 @@ rule runPLANTS:
         import OCDocker.Docking.PLANTS as ocplants
         import OCDocker.Receptor as ocr
         import OCDocker.Ligand as ocl
+        from OCDocker.DB.Ligands import Ligands
+        from OCDocker.DB.Receptors import Receptors
+
         import shutil
+
 
         # If the run folder exists
         if os.path.exists(os.path.join(wildcards.database, wildcards.receptor, "compounds", wildcards.kind, wildcards.target, "plantsFiles", "run")):
@@ -89,6 +93,18 @@ rule runPLANTS:
             receptor, relativeASAcutoff = 0.7, name = wildcards.receptor
         )
         plants_ligand = ocl.Ligand(ligand, name = wildcards.target)
+
+        # Set the receptor dictionary to insert in the database
+        receptorDict = vina_ligand.get_descriptors()
+        receptorDict["name"] = wildcards.receptor
+        # Insert it
+        Receptors.insert(receptorDict, ignorePresence = True)
+
+        # Set the ligand dictionary to insert in the database
+        ligandDict = vina_ligand.get_descriptors()
+        ligandDict["name"] = wildcards.target
+        # Insert it
+        Ligands.insert(ligandDict, ignorePresence = True)
 
         # Create the PLANTS object
         plants_obj = ocplants.PLANTS(

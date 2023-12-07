@@ -126,11 +126,14 @@ rule run_rescoring:
             import OCDocker.Docking.PLANTS as ocplants
             import OCDocker.Docking.Smina as ocsmina
             import OCDocker.Docking.Vina as ocvina
-            import OCDocker.Rescoring.ODDT as ocoddt
+            #import OCDocker.Rescoring.ODDT as ocoddt
             import OCDocker.Toolbox.Conversion as occonversion
             import OCDocker.Toolbox.FilesFolders as ocff
             import OCDocker.Toolbox.MoleculeProcessing as ocmolproc
             import OCDocker.Processing.Preprocessing.RmsdClustering as ocrmsdclust
+            from OCDocker.DB.Complexes import Complexes
+            from OCDocker.DB.Ligands import Ligands
+            from OCDocker.DB.Receptors import Receptors
 
             # Get the base directory for the output files
             plants_base_dir = os.path.dirname(input.plants_output)
@@ -205,6 +208,7 @@ rule run_rescoring:
                     processedMedoids["vina"].append(preparedOutfile)
                     processedMedoids["smina"].append(preparedOutfile)
                     processedMedoids["plants"].append(medoid)
+                
             # Dictionary with the medoids and its docking method (to be correctly parsed by the next function)
             medoidsDict = {}
 
@@ -290,6 +294,19 @@ rule run_rescoring:
             for sf in plants_scoring_functions:
                 # Read the rescoring results and save it in the dictionary
                 plantsRescoringResult[sf] = ocplants.read_rescore_logs(f"{plants_parent_base_dir}/run_{sf}/ranking.csv")
+
+            # Fetch the receptor
+            receptor = Receptors.ind(wildcards.receptor)
+
+            # Fetch the ligand
+            ligand = Ligands.ind(wildcards.target)
+
+            # Create the payload
+            payload = {'vina': vinaRescoringResult, 'smina': sminaRescoringResult, 'plants': plantsRescoringResult}
+
+            # Create the Complexes entry
+            complexes = Complexes.insert(receptor, ligand)
+
             
             print({'vina': vinaRescoringResult, 'smina': sminaRescoringResult, 'plants': plantsRescoringResult})#, 'oddt': ocoddt.df_to_dict(df)})
 
