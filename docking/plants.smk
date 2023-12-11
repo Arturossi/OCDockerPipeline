@@ -59,8 +59,8 @@ rule runPLANTS:
         import OCDocker.Docking.PLANTS as ocplants
         import OCDocker.Receptor as ocr
         import OCDocker.Ligand as ocl
-        from OCDocker.DB.Ligands import Ligands
-        from OCDocker.DB.Receptors import Receptors
+        from OCDocker.DB.Models.Ligands import Ligands
+        from OCDocker.DB.Models.Receptors import Receptors
 
         import shutil
 
@@ -95,14 +95,14 @@ rule runPLANTS:
         plants_ligand = ocl.Ligand(ligand, name = wildcards.target)
 
         # Set the receptor dictionary to insert in the database
-        receptorDict = vina_ligand.get_descriptors()
+        receptorDict = plants_receptor.get_descriptors()
         receptorDict["name"] = wildcards.receptor
         # Insert it
         Receptors.insert(receptorDict, ignorePresence = True)
 
         # Set the ligand dictionary to insert in the database
-        ligandDict = vina_ligand.get_descriptors()
-        ligandDict["name"] = wildcards.target
+        ligandDict = plants_ligand.get_descriptors()
+        ligandDict["name"] = wildcards.receptor + "_" + wildcards.target
         # Insert it
         Ligands.insert(ligandDict, ignorePresence = True)
 
@@ -134,5 +134,3 @@ rule runPLANTS:
 
         # Get the docking poses
         plantsdockingPoses = plants_obj.get_docked_poses()
-
-        print(plantsdockingPoses)

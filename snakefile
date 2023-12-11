@@ -28,7 +28,7 @@ import OCDP.preload as OCDPpre
 
 pdb_database_index = config["pdb_database_index"]
 
-pdbbind_targets = OCDPpre.preload_PDBbind(pdb_database_index, config["ignored_pdb_database_index"])[:5]
+pdbbind_targets = OCDPpre.preload_PDBbind(pdb_database_index, config["ignored_pdb_database_index"])
 
 
 # Program imports
@@ -131,9 +131,9 @@ rule run_rescoring:
             import OCDocker.Toolbox.FilesFolders as ocff
             import OCDocker.Toolbox.MoleculeProcessing as ocmolproc
             import OCDocker.Processing.Preprocessing.RmsdClustering as ocrmsdclust
-            from OCDocker.DB.Complexes import Complexes
-            from OCDocker.DB.Ligands import Ligands
-            from OCDocker.DB.Receptors import Receptors
+            from OCDocker.DB.Models.Complexes import Complexes
+            from OCDocker.DB.Models.Ligands import Ligands
+            from OCDocker.DB.Models.Receptors import Receptors
 
             # Get the base directory for the output files
             plants_base_dir = os.path.dirname(input.plants_output)
@@ -281,13 +281,59 @@ rule run_rescoring:
             ## Get the rescoring results #
             ##############################
 
-            # Vina
+            # Find the receptor in the database
+            receptor = Receptors.find(wildcards.receptor)[0]
+
+            # Find the ligand in the database
+            ligand = Ligands.find(wildcards.receptor + "_" + wildcards.target)[0]
+
+            # Create the payload
+            payload = { "receptor": receptor, "ligand": ligand, "name": wildcards.receptor + "-" + wildcards.target }
+
+            ## Vina
+            #########
             vinaRescoringResult = ocvina.read_rescore_logs(ocvina.get_rescore_log_paths(vina_base_dir))
 
-            # Smina
+            # Get the vina SFs
+            vinaSFs = list(vinaRescoringResult.keys())
+
+            # Reverse each string in the list
+            reversed_vinaSFs = [s[::-1] for s in vinaSFs]
+
+            # Find the common prefix of reversed strings
+            common_prefix = os.path.commonprefix(reversed_vinaSFs)
+
+            # Reverse the common prefix to get the common suffix
+            common_suffix = common_prefix[::-1]
+
+            for key, item in vinaRescoringResult.items():
+                # Remove the rescoring_ and the common suffix from the key
+                newKey = "VINA_" + key.lower().replace("rescoring_", "").replace(common_suffix, "").upper()
+                payload[newKey] = item
+            
+            ## Smina
+            ##########
             sminaRescoringResult = ocsmina.read_rescore_logs(ocsmina.get_rescore_log_paths(smina_base_dir))
 
-            # PLANTS
+            # Get the smina SFs
+            sminaSFs = list(sminaRescoringResult.keys())
+
+            # Reverse each string in the list
+            reversed_sminaSFs = [s[::-1] for s in sminaSFs]
+
+            # Find the common prefix of reversed strings
+            common_prefix = os.path.commonprefix(reversed_sminaSFs)
+
+            # Reverse the common prefix to get the common suffix
+            common_suffix = common_prefix[::-1]
+
+            for key, item in sminaRescoringResult.items():
+                # Remove the rescoring_ and the common suffix from the key
+                newKey = "SMINA_" + key.lower().replace("rescoring_", "").replace(common_suffix, "").upper()
+                payload[newKey] = item
+
+            ## PLANTS
+            ###########
             plantsRescoringResult = {}
 
             # For each scoring function
@@ -295,20 +341,13 @@ rule run_rescoring:
                 # Read the rescoring results and save it in the dictionary
                 plantsRescoringResult[sf] = ocplants.read_rescore_logs(f"{plants_parent_base_dir}/run_{sf}/ranking.csv")
 
-            # Fetch the receptor
-            receptor = Receptors.ind(wildcards.receptor)
-
-            # Fetch the ligand
-            ligand = Ligands.ind(wildcards.target)
-
-            # Create the payload
-            payload = {'vina': vinaRescoringResult, 'smina': sminaRescoringResult, 'plants': plantsRescoringResult}
+            for key, item in plantsRescoringResult.items():
+                newKey = "PLANTS_" + key.lower().replace("rescoring_", "").upper()
+                payload[newKey] = item[1]["PLANTS_TOTAL_SCORE"]
 
             # Create the Complexes entry
-            complexes = Complexes.insert(receptor, ligand)
-
+            complexes = Complexes.insert(payload)
             
-            print({'vina': vinaRescoringResult, 'smina': sminaRescoringResult, 'plants': plantsRescoringResult})#, 'oddt': ocoddt.df_to_dict(df)})
 
 rule GetLigands:
     """

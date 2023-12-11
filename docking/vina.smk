@@ -59,8 +59,8 @@ rule runVina:
         import OCDocker.Docking.Vina as ocvina
         import OCDocker.Receptor as ocr
         import OCDocker.Ligand as ocl
-        from OCDocker.DB.Ligands import Ligands
-        from OCDocker.DB.Receptors import Receptors
+        from OCDocker.DB.Models.Ligands import Ligands
+        from OCDocker.DB.Models.Receptors import Receptors
 
         # Create ligand and receptor objects
         ligand = os.path.join(wildcards.database, wildcards.receptor, "compounds", wildcards.kind, wildcards.target, "ligand.smi")
@@ -82,14 +82,14 @@ rule runVina:
         vina_ligand = ocl.Ligand(ligand, name = wildcards.target)
 
         # Set the receptor dictionary to insert in the database
-        receptorDict = vina_ligand.get_descriptors()
+        receptorDict = vina_receptor.get_descriptors()
         receptorDict["name"] = wildcards.receptor
         # Insert it
         Receptors.insert(receptorDict, ignorePresence = True)
 
         # Set the ligand dictionary to insert in the database
         ligandDict = vina_ligand.get_descriptors()
-        ligandDict["name"] = wildcards.target
+        ligandDict["name"] = wildcards.receptor + "_" + wildcards.target
         # Insert it
         Ligands.insert(ligandDict, ignorePresence = True)
 
@@ -129,5 +129,3 @@ rule runVina:
 
         # Get the docking poses
         vinaDockingPoses = vina_obj.get_docked_poses()
-
-        print(vinaDockingPoses)
