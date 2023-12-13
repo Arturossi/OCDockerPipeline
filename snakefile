@@ -71,7 +71,8 @@ def find_mols(wildcards):
     Find the molecules from the desired database.
     """
     
-    return ["tmp/" + wildcards.database + "!x!" + wildcards.receptor + "!x!" + wildcards.kind + "!x!" + os.path.basename(target) for target in glob(ocdb_path + "/" + wildcards.database + "/" + wildcards.receptor + "/compounds/" + wildcards.kind + "/*")]
+    return [os.path.join(ocdb_path, wildcards.database, wildcards.receptor, "compounds", wildcards.kind, target, "payload.pkl") for target in glob(os.path.join(ocdb_path, wildcards.database, wildcards.receptor, "compounds", wildcards.kind, "*"))]
+    #return ["tmp/" + wildcards.database + "!x!" + wildcards.receptor + "!x!" + wildcards.kind + "!x!" + os.path.basename(target) for target in glob(ocdb_path + "/" + wildcards.database + "/" + wildcards.receptor + "/compounds/" + wildcards.kind + "/*")]
 
 
 # Wildcards
@@ -114,7 +115,7 @@ rule run_rescoring:
         plants_output = ocdb_path + "/{database}/{receptor}/compounds/{kind}/{target}/plantsFiles/run/prepared_ligand_entry_00001_conf_01.mol2",
         vina_output = ocdb_path + "/{database}/{receptor}/compounds/{kind}/{target}/vinaFiles/ligand_split_1.pdbqt"
     output:
-        temp(touch("tmp/{database}!x!{receptor}!x!{kind}!x!{target}")),
+        ocdb_path + "/{database}/{receptor}/compounds/{kind}/{target}/payload.pkl",
     threads: 1
     run:
         # Test if the output files exists
@@ -282,10 +283,10 @@ rule run_rescoring:
             ##############################
 
             # Find the receptor in the database
-            receptor = Receptors.find(wildcards.receptor)[0]
+            receptor = Receptors.find_first(wildcards.receptor)
 
             # Find the ligand in the database
-            ligand = Ligands.find(wildcards.receptor + "_" + wildcards.target)[0]
+            ligand = Ligands.find_first(wildcards.receptor + "_" + wildcards.target)
 
             # Create the payload
             payload = { "receptor": receptor, "ligand": ligand, "name": wildcards.receptor + "-" + wildcards.target }
@@ -346,8 +347,10 @@ rule run_rescoring:
                 payload[newKey] = item[1]["PLANTS_TOTAL_SCORE"]
 
             # Create the Complexes entry
-            complexes = Complexes.insert(payload)
-            
+            complexes = Complexes.insert(payload, ignorePresence = True)
+
+            # Save the payload in a pickle file
+            ocff.to_pickle(payload, output[0])
 
 rule GetLigands:
     """
