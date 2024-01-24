@@ -72,5 +72,43 @@ def preload_PDBbind(pdbbind_database_index_path: str, ignored_pdbbind_database_i
     
     return pdbbind_targets
 
+def preload_DUDEz(dudez_database_index_path: str, ignored_dudez_database_index_path: str) -> List[str]:
+    ''' Read the DUDEz database indexes from the specified files, filter the ignored indexes and return the dudez database indexes list.
+
+    Parameters
+    ----------
+    dudez_database_index_path : str
+        Path to the dudez database indexes file.
+    ignored_dudez_database_index_path : str
+        Path to the ignored dudez database indexes file.
+
+    Returns
+    -------
+    dudez_targets : List[str]
+        List of dudez database indexes.
+    '''
+
+    # If the pdb_database_index file exists
+    if os.path.isfile(dudez_database_index_path):
+        # Open the file
+        with open(dudez_database_index_path, "r") as f:
+            # Read the dudez database indexes from the specified file in the config file
+            dudez_targets = list(set(line.strip() for line in f if line.strip()))
+    else:
+        sys.exit("The dudez_database_index file does not exist. Please, check the config file.")
+
+    # If the ignored_pdb_database_index file exists
+    if os.path.isfile(ignored_dudez_database_index_path):
+        # Open the file
+        with open(ignored_dudez_database_index_path, "r") as f:
+            # Read the ignored dudez database indexes from the specified file in the config file
+            ignored_dudez_targets = [line.strip() for line in f if line.strip()]
+        
+        # Remove from the dudez_targets list the ignored dudez database indexes
+        dudez_targets = [x for x in dudez_targets if x not in ignored_dudez_targets]
+    
+    return dudez_targets
+
+
 # Aliases
 ###############################################################################

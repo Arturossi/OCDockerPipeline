@@ -52,8 +52,8 @@ rule runVina:
     params:
         vina_log=config["logDir"] + "/vina.log",
     output:
-        prepared_ligand = "{database}/{receptor}/compounds/{kind}/{target}/prepared_ligand.pdbqt",
-        vina_output = "{database}/{receptor}/compounds/{kind}/{target}/vinaFiles/ligand_split_1.pdbqt",
+        prepared_ligand = "{database}/{receptor}/compounds/{kind}/{target}/prepared_{target}.pdbqt",
+        vina_output = "{database}/{receptor}/compounds/{kind}/{target}/vinaFiles/{target}_split_1.pdbqt",
     threads: 1
     run:
         import OCDocker.Docking.Vina as ocvina

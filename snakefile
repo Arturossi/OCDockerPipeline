@@ -30,12 +30,16 @@ pdb_database_index = config["pdb_database_index"]
 
 pdbbind_targets = OCDPpre.preload_PDBbind(pdb_database_index, config["ignored_pdb_database_index"])
 
+dudez_database_index = config["dudez_database_index"]
+
+dudez_targets = OCDPpre.preload_DUDEz(dudez_database_index, config["ignored_dudez_database_index"])
+
 
 # Program imports
 ###############################################################################
 include: "system/fileSystem.smk"
 include: "system/database/pdbbind.smk"
-#include: "system/database/dudez.smk"
+include: "system/database/dudez.smk"
 include: "docking/plants.smk"
 include: "docking/vina.smk"
 
@@ -66,13 +70,23 @@ zip_output = False              # Zip the output files
 update = False                  # Update the pipeline
 overwrite = False               # Overwrite the output files
 
-def find_mols(wildcards):
+def find_mols(database, receptor, kind):
     """
     Find the molecules from the desired database.
     """
+
+    mols = []
+
+    # For each database
+    for d in database:
+        # For each receptor
+        for r in receptor:
+            # For each kind
+            for k in kind:
+                # Find its molecules
+                mols += [os.path.join(ocdb_path, d, r, "compounds", k, t, "payload.pkl") for t in glob(os.path.join(ocdb_path, d, r, "compounds", k, "*"))]
     
-    return [os.path.join(ocdb_path, wildcards.database, wildcards.receptor, "compounds", wildcards.kind, target, "payload.pkl") for target in glob(os.path.join(ocdb_path, wildcards.database, wildcards.receptor, "compounds", wildcards.kind, "*"))]
-    #return ["tmp/" + wildcards.database + "!x!" + wildcards.receptor + "!x!" + wildcards.kind + "!x!" + os.path.basename(target) for target in glob(ocdb_path + "/" + wildcards.database + "/" + wildcards.receptor + "/compounds/" + wildcards.kind + "/*")]
+    return mols
 
 
 # Wildcards
@@ -105,6 +119,15 @@ rule db_pdbbind:
             pdbbind_target = pdbbind_targets,
         ),
 
+rule db_dudez:
+    """
+    Set up the DUDEz database.
+    """
+    input:
+        expand(ocdb_path + "/DUDEz/{dudez_target}/receptor.pdb",
+            dudez_target = dudez_targets,
+        ),
+
 rule run_rescoring:
     """
     Run the rescoring of the poses from all docking software.
@@ -113,9 +136,9 @@ rule run_rescoring:
         joblib_backend = config["joblib_backend"],
     input:
         plants_output = ocdb_path + "/{database}/{receptor}/compounds/{kind}/{target}/plantsFiles/run/prepared_ligand_entry_00001_conf_01.mol2",
-        vina_output = ocdb_path + "/{database}/{receptor}/compounds/{kind}/{target}/vinaFiles/ligand_split_1.pdbqt"
+        vina_output = ocdb_path + "/{database}/{receptor}/compounds/{kind}/{target}/vinaFiles/{target}_split_1.pdbqt"
     output:
-        ocdb_path + "/{database}/{receptor}/compounds/{kind}/{target}/payload.pkl",
+        touch(ocdb_path + "/{database}/{receptor}/compounds/{kind}/{target}/payload.pkl"),
     threads: 1
     run:
         # Test if the output files exists
@@ -350,19 +373,9 @@ rule run_rescoring:
             complexes = Complexes.insert(payload, ignorePresence = True)
 
             # Save the payload in a pickle file
-            ocff.to_pickle(payload, output[0])
-
-rule GetLigands:
-    """
-    Discover the ligands from the desired database.
-    """
-    input:
-        ligands = find_mols
-    output:
-        temp(touch("tmp/{database}!-!{receptor}!-!{kind}")),
-    run:
-        print(input.ligands)
-
+            ocff.to_pickle(output[0], payload)
+        else:
+            print(f"One of the input files does not exists: '{input.plants_output}' or '{input.vina_output}'")
 rule all:
     """
     Prepare the input files for PLANTS docking software.
@@ -371,9 +384,13 @@ rule all:
         snakemake all --cores 20 --use-conda --conda-frontend mamba --keep-going --wms-monitor http://127.0.0.1:5000
     """
     input:
-        allkinds = expand(
-            "tmp/{database}!-!{receptor}!-!{kind}",
-            database = ["PDBbind"], 
-            receptor = pdbbind_targets, 
-            kind = ["ligands", "decoys", "compounds"],
-        ),
+        allkinds = expand(find_mols(["DUDEz"], dudez_targets, ["ligands", "decoys", "compounds"])),
+        #allkinds = expand(find_mols(["PDBbind"], pdbbind_targets, ["ligands", "decoys", "compounds"])),
+        #allkinds = expand(
+        #    "tmp/{database}!-!{receptor}!-!{kind}",
+        #    database = ["PDBbind"], 
+        #    receptor = pdbbind_targets, 
+        #    kind = ["ligands", "decoys", "compounds"],
+        #),
+    run:
+        print("All done!")

@@ -17,3 +17,4 @@ pdb_database_index: "/data/hd4tb/OCDocker/data/pdbbind_proteins.txt"
 ignored_pdb_database_index: "/data/hd4tb/OCDocker/data/problematic_pdbbind_proteins.txt"
 
 dudez_database_index: "/data/hd4tb/OCDocker/data/dudez_proteins.txt"
+ignored_dudez_database_index: "/data/hd4tb/OCDocker/data/problematic_dudez_proteins.txt"

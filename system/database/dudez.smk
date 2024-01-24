@@ -37,20 +37,9 @@ from OCDocker.Initialise import *
 from typing import List
 
 def get_targets(file: str) -> List[str]:
-    with open("tmp/DUDE-Z_targets", 'r') as file:
-        return file.read().splitlines()
+    with open(file, 'r') as f:
+        return f.read().splitlines()
     
-# If there is an file for DUDEz in the path
-if os.path.isfile(config["dudez_database_index"]):
-    # Get the targets
-    dudez_targets = get_targets(config["dudez_database_index"])
-else:
-    import OCDocker.Toolbox.Downloading as ocdown
-    # Download the benchmark grids indexes
-    ocdown.download_url(f"{dudez_download}/DUDE-Z-benchmark-grids/DUDE-Z_targets", "tmp/DUDE-Z_targets")
-    # Get the targets
-    dudez_targets = get_targets("tmp/DUDE-Z_targets")
-
 
 # Rules
 ###############################################################################
@@ -148,10 +137,52 @@ rule download_process_DUDEz:
             ocdown.download_url(f"{dudez_download}/DOCKING_GRIDS_AND_POSES/{ptn_target}/rec.crg.pdb", f"{dudez_archive}/{ptn_target}/receptor.pdb")
 
         # Check if the reference ligand does not exists or the user wants to overwrite it
-        if not os.path.isfile(f"{dudez_archive}/{ptn_target}/ligand.mol2") or overwrite:
+        if not os.path.isfile(f"{dudez_archive}/{ptn_target}/reference_ligand.pdb") or overwrite:
             # Download the target receptor
             ocdown.download_url(f"{dudez_download}/DOCKING_GRIDS_AND_POSES/{ptn_target}/xtal-lig.pdb", f"{dudez_archive}/{ptn_target}/reference_ligand.pdb")
+            
+            ## Create a box file from the reference ligand
+            
+            # Needed imports
+            import OCDocker.Ligand as ocl
 
+            # Set the name of the ligand
+            molName = f"{ptn_target}_reference_ligand"
+
+            ref_ligand = f"{dudez_archive}/{ptn_target}/reference_ligand.pdb"
+
+            if os.path.isfile(ref_ligand):
+                try:
+                    try:
+                        # Set the target centroid as the centroid of the ligand from the mol2 file
+                        targetCentroid = ocl.get_centroid(ref_ligand, sanitize = True)
+                    except:
+                        # Set the target centroid as the centroid of the ligand from the mol2 file
+                        targetCentroid = ocl.get_centroid(ref_ligand, sanitize = False)
+                    
+                    # Check if the target centroid is None
+                    if not targetCentroid:
+                        # Print a warning
+                        ocprint.print_warning(message = f"WARNING: The centroid of the reference ligand in path '{ref_ligand}' could not be calculated. The centroid of the receptor will be used instead.")
+                        return
+
+                except Exception as e:
+                    # Print the error
+                    ocprint.print_error(f"Problems parsing the reference ligand file: {ref_ligand}. Error: {e}")
+            
+            try:
+                # Create the ligand object
+                m = ocl.Ligand(ref_ligand, molName, sanitize = True)
+            except:
+                try:
+                    # Create the ligand object (without sanitizing)
+                    m = ocl.Ligand(ref_ligand, molName, sanitize = False)
+                except:
+                    return
+
+            # Create a box around the ligand
+            m.create_box(centroid = targetCentroid, overwrite = overwrite)
+            
         # Check if the target dudez ligands does not exists or the user wants to overwrite it
         if not os.path.isfile(f"{dudez_archive}/{ptn_target}/ligands.smi") or overwrite:
             # Download the dudeZ ligands
@@ -175,6 +206,7 @@ rule download_process_DUDEz:
         for data in process_list:
             # Create the ligands folder
             _ = ocff.safe_create_dir(f"{targetc}/{data}")
+
             # Process the ligands, splitting them into the multiple files
             with open(os.path.join(dudez_archive, wildcards.target, f"{data}.smi"), 'r') as f:
                 for line in f:
@@ -190,10 +222,22 @@ rule download_process_DUDEz:
                         if os.path.isfile(f"{targetc}/{data}/{name}/ligand.mol2"):
                             # Remove the file
                             os.remove(f"{targetc}/{data}/{name}/ligand.mol2")
+
                         # Convert it to mol2 (NOTE: There are many molecules with SAME name... currently I am not handling this. I am just accounting the first molecule and discarding the others. IMPORTANT: Error messages WILL pop while processing the data here! They may be safe to ignore, I guess...)
                         _ = occonversion.convertMolsFromString(smiles, f"{targetc}/{data}/{name}/ligand.mol2")
+
                         # Save a smiles file (to avoid compatibility issues)
                         with open(f"{targetc}/{data}/{name}/ligand.smi", 'w') as f:
                             f.write(f"{smiles}")
                     else:
                         ocerror.Error.file_exists(f"File '{targetc}/{data}/{name}/ligand.mol2' already exists. Skipping...", level = ocerror.ReportLevel.WARNING)
+                    
+                    # Test if the box file exists
+                    if overwrite or not os.path.isfile(f"{targetc}/{data}/{name}/boxes/box0.pdb"):
+                        # Create the box folder
+                        #_ = ocff.safe_create_dir(f"{targetc}/{data}/{name}/boxes")
+
+                        # Copy the box from the base folder
+                        shutil.copytree(f"{dudez_archive}/{wildcards.target}/boxes", f"{targetc}/{data}/{name}/boxes")
+                    else:
+                        ocerror.Error.file_exists(f"File '{targetc}/{data}/{name}/boxes/box0.pdb' already exists. Skipping...", level = ocerror.ReportLevel.WARNING)
