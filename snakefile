@@ -134,15 +134,15 @@ rule run_rescoring:
     """
     params:
         joblib_backend = config["joblib_backend"],
-    input:
-        plants_output = ocdb_path + "/{database}/{receptor}/compounds/{kind}/{target}/plantsFiles/run/prepared_ligand_entry_00001_conf_01.mol2",
-        vina_output = ocdb_path + "/{database}/{receptor}/compounds/{kind}/{target}/vinaFiles/{target}_split_1.pdbqt"
     output:
         touch(ocdb_path + "/{database}/{receptor}/compounds/{kind}/{target}/payload.pkl"),
     threads: 1
     run:
+        plants_output = ocdb_path + "/" + wildcards.database + "/" + wildcards.receptor + "/compounds/" + wildcards.kind + "/" + wildcards.target + "/plantsFiles/run/prepared_ligand_entry_00001_conf_01.mol2"
+        vina_output = ocdb_path + "/" + wildcards.database + "/" + wildcards.receptor + "/compounds/" + wildcards.kind + "/" + wildcards.target + "/vinaFiles/" + wildcards.target + "_split_1.pdbqt"
+
         # Test if the output files exists
-        if os.path.isfile(input.plants_output) and os.path.isfile(input.vina_output):
+        if os.path.isfile(plants_output) and os.path.isfile(vina_output):
             # To fix Loky backend issue
             from joblib import parallel_backend
 
@@ -159,9 +159,11 @@ rule run_rescoring:
             from OCDocker.DB.Models.Ligands import Ligands
             from OCDocker.DB.Models.Receptors import Receptors
 
+            bindingSiteCenter, bindingSiteRadius = ocplants.get_binding_site(ocdb_path + "/" + wildcards.database + "/" + wildcards.receptor + "/compounds/" + wildcards.kind + "/" + wildcards.target + "/boxes/box0.pdb")
+
             # Get the base directory for the output files
-            plants_base_dir = os.path.dirname(input.plants_output)
-            vina_base_dir = os.path.dirname(input.vina_output)
+            plants_base_dir = os.path.dirname(plants_output)
+            vina_base_dir = os.path.dirname(vina_output)
 
             # Set the base path for the ligand
             basePath = os.path.dirname(vina_base_dir)
@@ -291,7 +293,7 @@ rule run_rescoring:
                 confFile = os.path.join(plants_parent_base_dir, wildcards.target + f"_rescoring_{sf}.txt")
 
                 # Run the rescoring
-                ocplants.run_rescore(confFile, pose_list, outPath, preparedReceptor_plants, sf, logFile = "", overwrite = False) # type: ignore
+                ocplants.run_rescore(confFile, poseListPath, outPath, preparedReceptor_plants, sf, bindingSiteCenter[0], bindingSiteCenter[1], bindingSiteCenter[2], bindingSiteRadius, logFile = "", overwrite = True) # type: ignore
 
             #########################
             ## Run ODDT rescoring   #
@@ -375,7 +377,7 @@ rule run_rescoring:
             # Save the payload in a pickle file
             ocff.to_pickle(output[0], payload)
         else:
-            print(f"One of the input files does not exists: '{input.plants_output}' or '{input.vina_output}'")
+            print(f"One of the input files does not exists: '{plants_output}' or '{vina_output}'")
 rule all:
     """
     Prepare the input files for PLANTS docking software.
@@ -384,8 +386,8 @@ rule all:
         snakemake all --cores 20 --use-conda --conda-frontend mamba --keep-going --wms-monitor http://127.0.0.1:5000
     """
     input:
-        allkinds = expand(find_mols(["DUDEz"], dudez_targets, ["ligands", "decoys", "compounds"])),
-        #allkinds = expand(find_mols(["PDBbind"], pdbbind_targets, ["ligands", "decoys", "compounds"])),
+        #allkinds = expand(find_mols(["DUDEz"], dudez_targets, ["ligands", "decoys", "compounds"])),
+        allkinds = expand(find_mols(["PDBbind"], pdbbind_targets, ["ligands", "decoys", "compounds"])),
         #allkinds = expand(
         #    "tmp/{database}!-!{receptor}!-!{kind}",
         #    database = ["PDBbind"], 
