@@ -34,6 +34,11 @@ This project is licensed under the GNU General Public License v3.0
 
 # Python functions and imports
 ###############################################################################
+import os
+
+from OCDocker.Config import get_config
+
+ocdb_path = get_config().paths.ocdb_path or ""
 
 # Rules
 ###############################################################################
@@ -51,29 +56,46 @@ rule runVina:
     """
     params:
         vina_log=config["logDir"] + "/vina.log",
+    input:
+        ligand = os.path.join(
+            ocdb_path, "{database}", "{receptor}", "compounds", "{kind}",
+            "{target}", "ligand.smi"
+        ),
+        receptor = os.path.join(ocdb_path, "{database}", "{receptor}", "receptor.pdb"),
+        box = os.path.join(
+            ocdb_path, "{database}", "{receptor}", "compounds", "{kind}",
+            "{target}", "boxes", "box0.pdb"
+        ),
     output:
-        prepared_ligand = "{database}/{receptor}/compounds/{kind}/{target}/prepared_{target}.pdbqt",
-        vina_output = "{database}/{receptor}/compounds/{kind}/{target}/vinaFiles/{target}_split_1.pdbqt",
+        prepared_ligand = os.path.join(
+            ocdb_path, "{database}", "{receptor}", "compounds", "{kind}",
+            "{target}", "prepared_{target}.pdbqt"
+        ),
+        vina_output = os.path.join(
+            ocdb_path, "{database}", "{receptor}", "compounds", "{kind}",
+            "{target}", "vinaFiles", "{target}_split_1.pdbqt"
+        ),
     threads: 1
     run:
         import OCDocker.Docking.Vina as ocvina
         import OCDocker.Receptor as ocr
         import OCDocker.Ligand as ocl
+        import OCDocker.Error as ocerror
         from OCDocker.DB.Models.Ligands import Ligands
         from OCDocker.DB.Models.Receptors import Receptors
 
         # Create ligand and receptor objects
-        ligand = os.path.join(wildcards.database, wildcards.receptor, "compounds", wildcards.kind, wildcards.target, "ligand.smi")
-        receptor = os.path.join(wildcards.database, wildcards.receptor, "receptor.pdb")
+        ligand = input.ligand
+        receptor = input.receptor
 
         # Set the base paths
         baseLigPath = os.path.dirname(ligand)
 
         # Set the boxFile
-        boxFile = f"{baseLigPath}/boxes/box0.pdb"
+        boxFile = input.box
         confFile = os.path.join(baseLigPath, "vinaFiles", "conf_vina.txt")
 
-        prepared_receptor = os.path.join(wildcards.database, wildcards.receptor, "prepared_receptor.pdbqt")
+        prepared_receptor = os.path.join(ocdb_path, wildcards.database, wildcards.receptor, "prepared_receptor.pdbqt")
 
         # Create the Receptor object
         vina_receptor = ocr.Receptor(

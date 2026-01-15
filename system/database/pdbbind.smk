@@ -32,11 +32,16 @@ This project is licensed under the GNU General Public License v3.0
 # Python functions and imports
 ###############################################################################
 import os
-import sys
-sys.path.append("/data/hd4tb/OCDocker/OCDocker")
-from OCDocker.Initialise import *
+
+from OCDocker.Config import get_config
+import OCDocker.Error as ocerror
 
 import OCDP.preload as OCDPpre
+
+oc_config = get_config()
+ocdb_path = oc_config.paths.ocdb_path or ""
+pdbbind_archive = oc_config.pdbbind_archive or os.path.join(ocdb_path, "PDBbind")
+overwrite = bool(config.get("overwrite", False))
 
 #pdbbind_targets = OCDPpre.preload_PDBBind(config["pdb_database_index"], config["ignored_pdb_database_index"])
 
@@ -182,6 +187,7 @@ rule process_PDBbind:
         import OCDocker.Toolbox.FilesFolders as ocff
         import OCDocker.Toolbox.Printing as ocprint
         import OCDocker.Ligand as ocl
+        import shutil
 
         # Check if there is a refined-set folder
         if os.path.isdir(os.path.join(pdbbind_archive, "refined-set")):
@@ -238,7 +244,7 @@ rule process_PDBbind:
 
             try:
                 # Convert the ligand to smiles and save it in the ligand folder
-                _ = occonversion.convertMols(f"{destPath}/reference_ligand.mol2", output.ligand)
+                _ = occonversion.convert_mols(f"{destPath}/reference_ligand.mol2", output.ligand, overwrite=overwrite)
                 # Make a copy of the ligand to serve as reference and then move the ligand files to the ligands folder (smi)
                 shutil.copy(output.ligand, f"{destPath}/reference_ligand.smi")
             except:
@@ -308,4 +314,3 @@ rule process_PDBbind:
 
             return ocerror.Error.ok()
         return ocerror.Error.dir_not_exist(f"The folder 'refined-set' does not exist in the PDBbind folder ('{pdbbind_archive}'). Please, check if the dataset is correct and try again.", level = ocerror.ReportLevel.ERROR)
-

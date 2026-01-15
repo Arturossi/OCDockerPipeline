@@ -34,10 +34,14 @@ This project is licensed under the GNU General Public License v3.0
 
 # Python functions and imports
 ###############################################################################
-import sys
-sys.path.append("/data/hd4tb/OCDocker/OCDocker")
 import os
-from OCDocker.Initialise import *
+
+from OCDocker.Config import get_config
+
+oc_config = get_config()
+ocdb_path = oc_config.paths.ocdb_path or ""
+dudez_archive = oc_config.dudez_archive or os.path.join(ocdb_path, "DUDEz")
+pdbbind_archive = oc_config.pdbbind_archive or os.path.join(ocdb_path, "PDBbind")
 
 # Rules
 ###############################################################################
@@ -61,7 +65,7 @@ rule createDatabaseFolders:
     output:
         dudezDir=directory(dudez_archive), # Needed for the DUDEz database
         logDir=directory(config["logDir"]), # Needed for the log files
-        pdbbindDir=directory("pdbbind_archive"), # Needed for the PDBbind database
+        pdbbindDir=directory(pdbbind_archive), # Needed for the PDBbind database
     run:
         # Check if the log directory does not exist
         if not os.path.exists(output.logDir):

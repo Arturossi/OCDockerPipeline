@@ -31,10 +31,18 @@ This project is licensed under the GNU General Public License v3.0
 
 # Python functions and imports
 ###############################################################################
-import sys
-sys.path.append("/data/hd4tb/OCDocker/OCDocker")
-from OCDocker.Initialise import *
+import os
+
 from typing import List
+
+from OCDocker.Config import get_config
+import OCDocker.Error as ocerror
+
+oc_config = get_config()
+ocdb_path = oc_config.paths.ocdb_path or ""
+dudez_archive = oc_config.dudez_archive or os.path.join(ocdb_path, "DUDEz")
+dudez_download = oc_config.dudez_download
+overwrite = bool(config.get("overwrite", False))
 
 def get_targets(file: str) -> List[str]:
     with open(file, 'r') as f:
@@ -122,6 +130,7 @@ rule download_process_DUDEz:
         import OCDocker.Toolbox.Conversion as occonversion
         import OCDocker.Toolbox.Downloading as ocdown
         import OCDocker.Toolbox.FilesFolders as ocff
+        import shutil
 
         if wildcards.target == "D4":
             ptn_target = "DRD4"
@@ -224,7 +233,7 @@ rule download_process_DUDEz:
                             os.remove(f"{targetc}/{data}/{name}/ligand.mol2")
 
                         # Convert it to mol2 (NOTE: There are many molecules with SAME name... currently I am not handling this. I am just accounting the first molecule and discarding the others. IMPORTANT: Error messages WILL pop while processing the data here! They may be safe to ignore, I guess...)
-                        _ = occonversion.convertMolsFromString(smiles, f"{targetc}/{data}/{name}/ligand.mol2")
+                        _ = occonversion.convert_mols_from_string(smiles, f"{targetc}/{data}/{name}/ligand.mol2")
 
                         # Save a smiles file (to avoid compatibility issues)
                         with open(f"{targetc}/{data}/{name}/ligand.smi", 'w') as f:

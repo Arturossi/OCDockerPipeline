@@ -1,20 +1,42 @@
+import argparse
 import os
-import sys
 
 from glob import glob
 from tqdm import tqdm
 
-sys.path.append("/data/hd4tb/OCDocker/OCDocker")
-sys.path.append("/data/hd4tb/OCDocker/OCDockerPipeline")
-sys.path.append("~/miniconda3/envs/ocdocker/lib/python3.9/site-packages")
+os.environ.setdefault("OCDOCKER_NO_AUTO_BOOTSTRAP", "1")
 
-from OCDocker.Initialise import * # type: ignore
+import OCDocker.Error as ocerror
+import OCDocker.Initialise as ocinit
+from OCDocker.Config import get_config
 
 import OCDP.preload as OCDPpre
 
-dudez_database_index = "/data/hd4tb/OCDocker/data/dudez_proteins.txt"
+pipeline_root = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
+config_file = os.getenv("OCDOCKER_CONFIG", os.path.join(pipeline_root, "OCDocker.cfg"))
+bootstrap_ns = argparse.Namespace(
+    multiprocess=True,
+    update=False,
+    config_file=config_file,
+    output_level=ocerror.ReportLevel.INFO,
+    overwrite=False,
+)
+ocinit.bootstrap(bootstrap_ns)
+oc_config = get_config()
+ocdb_path = oc_config.paths.ocdb_path or ""
+if not ocdb_path:
+    raise RuntimeError("OCDocker ocdb path is not set. Update OCDocker.cfg (ocdb) and rerun.")
 
-dudez_targets = OCDPpre.preload_DUDEz(dudez_database_index, "/data/hd4tb/OCDocker/data/problematic_dudez_proteins.txt")
+dudez_database_index = os.getenv(
+    "OCDOCKER_DUDEZ_INDEX",
+    "/data/hd4tb/OCDocker/data/dudez_proteins.txt",
+)
+problematic_dudez_index = os.getenv(
+    "OCDOCKER_DUDEZ_IGNORED_INDEX",
+    "/data/hd4tb/OCDocker/data/problematic_dudez_proteins.txt",
+)
+
+dudez_targets = OCDPpre.preload_DUDEz(dudez_database_index, problematic_dudez_index)
 
 # Import the libraries
 import OCDocker.Docking.PLANTS as ocplants
@@ -30,7 +52,7 @@ from OCDocker.DB.Models.Ligands import Ligands
 from OCDocker.DB.Models.Receptors import Receptors
 
 cpu_cores = 16
-available_cores = cpu_cores - 1 # The main thread is not counted
+available_cores = max(cpu_cores - 1, 1) # The main thread is not counted
 multiprocess = 1                # 0: single process; 1: multiprocess
 generate_report = False         # Generate a report at the end of the pipeline
 zip_output = False              # Zip the output files

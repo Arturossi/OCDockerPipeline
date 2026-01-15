@@ -17,15 +17,45 @@ configfile: "config.yaml"
 
 # Python functions and imports
 ###############################################################################
-import sys
+import argparse
+import os
 
 from glob import glob
 
-sys.path.append("/data/hd4tb/OCDocker/OCDocker")
-from OCDocker.Initialise import *
+# Disable auto-bootstrap so we can explicitly load the pipeline config.
+os.environ.setdefault("OCDOCKER_NO_AUTO_BOOTSTRAP", "1")
+
+import OCDocker.Error as ocerror
+import OCDocker.Initialise as ocinit
+from OCDocker.Config import get_config
 
 import OCDP.preload as OCDPpre
 
+# Bootstrap OCDocker using the pipeline config to populate the shared Config object.
+pipeline_root = os.path.dirname(os.path.abspath(__file__))
+config_file = os.getenv("OCDOCKER_CONFIG", os.path.join(pipeline_root, "OCDocker.cfg"))
+log_level = str(config.get("log_level", "info")).lower()
+log_level_map = {
+    "debug": ocerror.ReportLevel.DEBUG,
+    "info": ocerror.ReportLevel.INFO,
+    "warning": ocerror.ReportLevel.WARNING,
+    "error": ocerror.ReportLevel.ERROR,
+    "none": ocerror.ReportLevel.NONE,
+}
+output_level = log_level_map.get(log_level, ocerror.ReportLevel.INFO)
+bootstrap_ns = argparse.Namespace(
+    multiprocess=config.get("cpu_cores", 1) > 1,
+    update=False,
+    config_file=config_file,
+    output_level=output_level,
+    overwrite=bool(config.get("overwrite", False)),
+)
+ocinit.bootstrap(bootstrap_ns)
+
+oc_config = get_config()
+ocdb_path = oc_config.paths.ocdb_path or ""
+if not ocdb_path:
+    raise RuntimeError("OCDocker ocdb path is not set. Update OCDocker.cfg (ocdb) and rerun.")
 pdb_database_index = config["pdb_database_index"]
 
 pdbbind_targets = OCDPpre.preload_PDBbind(pdb_database_index, config["ignored_pdb_database_index"])
@@ -47,28 +77,17 @@ include: "docking/vina.smk"
 # Python definitions
 ###############################################################################
 
-# Set the output_level according to the log_level from the config file
-if config["log_level"] == "debug":
-    output_level = 5
-elif config["log_level"] == "info":
-    output_level = 4
-elif config["log_level"] == "warning":
-    output_level = 2
-elif config["log_level"] == "error":
-    output_level = 1
-elif config["log_level"] == "none":
-    output_level = 0
-else:
-    output_level = 3
-
 # Set some more arguments
 cpu_cores = config["cpu_cores"]
-available_cores = cpu_cores - 1 # The main thread is not counted
+available_cores = max(cpu_cores - 1, 1) # The main thread is not counted
 multiprocess = 1                # 0: single process; 1: multiprocess
 generate_report = False         # Generate a report at the end of the pipeline
 zip_output = False              # Zip the output files
 update = False                  # Update the pipeline
-overwrite = False               # Overwrite the output files
+overwrite = bool(config.get("overwrite", False)) # Overwrite the output files
+vina_scoring_functions = list(oc_config.vina.scoring_functions)
+smina_scoring_functions = list(oc_config.smina.scoring_functions)
+plants_scoring_functions = list(oc_config.plants.scoring_functions)
 
 def find_mols(database, receptor, kind):
     """
@@ -115,7 +134,7 @@ rule db_pdbbind:
     Set up the PDBbind database.
     """
     input:
-        expand(ocdb_path + "/PDBbind/{pdbbind_target}/receptor.pdb",
+        expand(os.path.join(ocdb_path, "PDBbind", "{pdbbind_target}", "receptor.pdb"),
             pdbbind_target = pdbbind_targets,
         ),
 
@@ -124,7 +143,7 @@ rule db_dudez:
     Set up the DUDEz database.
     """
     input:
-        expand(ocdb_path + "/DUDEz/{dudez_target}/receptor.pdb",
+        expand(os.path.join(ocdb_path, "DUDEz", "{dudez_target}", "receptor.pdb"),
             dudez_target = dudez_targets,
         ),
 
@@ -134,12 +153,24 @@ rule run_rescoring:
     """
     params:
         joblib_backend = config["joblib_backend"],
+    input:
+        plants_output = os.path.join(
+            ocdb_path, "{database}", "{receptor}", "compounds", "{kind}",
+            "{target}", "plantsFiles", "run", "prepared_ligand_entry_00001_conf_01.mol2"
+        ),
+        vina_output = os.path.join(
+            ocdb_path, "{database}", "{receptor}", "compounds", "{kind}",
+            "{target}", "vinaFiles", "{target}_split_1.pdbqt"
+        ),
     output:
-        touch(ocdb_path + "/{database}/{receptor}/compounds/{kind}/{target}/payload.pkl"),
+        touch(os.path.join(
+            ocdb_path, "{database}", "{receptor}", "compounds",
+            "{kind}", "{target}", "payload.pkl"
+        )),
     threads: 1
     run:
-        plants_output = ocdb_path + "/" + wildcards.database + "/" + wildcards.receptor + "/compounds/" + wildcards.kind + "/" + wildcards.target + "/plantsFiles/run/prepared_ligand_entry_00001_conf_01.mol2"
-        vina_output = ocdb_path + "/" + wildcards.database + "/" + wildcards.receptor + "/compounds/" + wildcards.kind + "/" + wildcards.target + "/vinaFiles/" + wildcards.target + "_split_1.pdbqt"
+        plants_output = input.plants_output
+        vina_output = input.vina_output
 
         # Test if the output files exists
         if os.path.isfile(plants_output) and os.path.isfile(vina_output):
@@ -159,7 +190,11 @@ rule run_rescoring:
             from OCDocker.DB.Models.Ligands import Ligands
             from OCDocker.DB.Models.Receptors import Receptors
 
-            bindingSiteCenter, bindingSiteRadius = ocplants.get_binding_site(ocdb_path + "/" + wildcards.database + "/" + wildcards.receptor + "/compounds/" + wildcards.kind + "/" + wildcards.target + "/boxes/box0.pdb")
+            box_path = os.path.join(
+                ocdb_path, wildcards.database, wildcards.receptor, "compounds",
+                wildcards.kind, wildcards.target, "boxes", "box0.pdb"
+            )
+            bindingSiteCenter, bindingSiteRadius = ocplants.get_binding_site(box_path)
 
             # Get the base directory for the output files
             plants_base_dir = os.path.dirname(plants_output)
@@ -175,14 +210,15 @@ rule run_rescoring:
             ocff.safe_create_dir(smina_base_dir)
 
             # Find the poses contained in this directory
-            plants_poses = ocplants.get_docked_poses(plants_base_dir)
-            vina_poses = ocvina.get_docked_poses(vina_base_dir)
+            plants_poses = sorted(ocplants.get_docked_poses(plants_base_dir))
+            vina_poses = sorted(ocvina.get_docked_poses(vina_base_dir))
+
+            if not plants_poses or not vina_poses:
+                print(f"No docking poses found for {wildcards.receptor}/{wildcards.target}.")
+                return
 
             # Concatenate the poses lists from vina and plants into a single list
             poses_list = vina_poses + plants_poses
-
-            # Get the rmsd matrix from the poses list
-            mols_mat = ocmolproc.get_rmsd_matrix(poses_list)
 
             # Get the rmsd matrix from the poses list
             rmsdMatrix = ocmolproc.get_rmsd_matrix(poses_list)
@@ -216,9 +252,9 @@ rule run_rescoring:
                     outfile = f"{fdirectory}/{os.path.basename(medoid).replace('.pdbqt', '.mol2')}"
                     preparedOutfile = f"{fdirectory}/{os.path.basename(medoid).replace('.pdbqt', '_prepared.mol2')}"
                     # Convert the file to mol2
-                    occonversion.convertMols(medoid, outfile)
+                    occonversion.convert_mols(medoid, outfile, overwrite=overwrite)
                     # Prepare the mol2 file for PLANTS
-                    ocplants.run_prepare_ligand(outfile, preparedOutfile)
+                    ocplants.run_prepare_ligand(outfile, preparedOutfile, overwrite=overwrite)
                     # Append the prepared file to the processedMedoids dict
                     processedMedoids["vina"].append(medoid)
                     processedMedoids["smina"].append(medoid)
@@ -229,7 +265,7 @@ rule run_rescoring:
                     # Set the prepared output file path
                     preparedOutfile = f"{fdirectory}/{os.path.basename(medoid).replace('.mol2', '_prepared.pdbqt')}"
                     # Prepare the pdbqt file for Vina
-                    ocvina.run_prepare_ligand(medoid, preparedOutfile)
+                    ocvina.run_prepare_ligand(medoid, preparedOutfile, overwrite=overwrite)
                     # Append the prepared file to the processedMedoids dict
                     processedMedoids["vina"].append(preparedOutfile)
                     processedMedoids["smina"].append(preparedOutfile)

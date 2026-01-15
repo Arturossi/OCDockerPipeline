@@ -34,6 +34,11 @@ This project is licensed under the GNU General Public License v3.0
 
 # Python functions and imports
 ###############################################################################
+import os
+
+from OCDocker.Config import get_config
+
+ocdb_path = get_config().paths.ocdb_path or ""
 
 # Rules
 ###############################################################################
@@ -51,14 +56,31 @@ rule runPLANTS:
     """
     params:
         plants_log=config["logDir"] + "/plants.log",
+    input:
+        ligand = os.path.join(
+            ocdb_path, "{database}", "{receptor}", "compounds", "{kind}",
+            "{target}", "ligand.smi"
+        ),
+        receptor = os.path.join(ocdb_path, "{database}", "{receptor}", "receptor.pdb"),
+        box = os.path.join(
+            ocdb_path, "{database}", "{receptor}", "compounds", "{kind}",
+            "{target}", "boxes", "box0.pdb"
+        ),
     output:
-        prepared_ligand = "{database}/{receptor}/compounds/{kind}/{target}/prepared_ligand.mol2",
-        plants_output = "{database}/{receptor}/compounds/{kind}/{target}/plantsFiles/run/prepared_ligand_entry_00001_conf_01.mol2",
+        prepared_ligand = os.path.join(
+            ocdb_path, "{database}", "{receptor}", "compounds", "{kind}",
+            "{target}", "prepared_ligand.mol2"
+        ),
+        plants_output = os.path.join(
+            ocdb_path, "{database}", "{receptor}", "compounds", "{kind}",
+            "{target}", "plantsFiles", "run", "prepared_ligand_entry_00001_conf_01.mol2"
+        ),
     threads: 1
     run:
         import OCDocker.Docking.PLANTS as ocplants
         import OCDocker.Receptor as ocr
         import OCDocker.Ligand as ocl
+        import OCDocker.Error as ocerror
         from OCDocker.DB.Models.Ligands import Ligands
         from OCDocker.DB.Models.Receptors import Receptors
 
@@ -66,21 +88,27 @@ rule runPLANTS:
 
 
         # If the run folder exists
-        if os.path.exists(os.path.join(wildcards.database, wildcards.receptor, "compounds", wildcards.kind, wildcards.target, "plantsFiles", "run")):
-            shutil.rmtree(os.path.join(wildcards.database, wildcards.receptor, "compounds", wildcards.kind, wildcards.target, "plantsFiles", "run"))
+        if os.path.exists(os.path.join(
+            ocdb_path, wildcards.database, wildcards.receptor,
+            "compounds", wildcards.kind, wildcards.target, "plantsFiles", "run"
+        )):
+            shutil.rmtree(os.path.join(
+                ocdb_path, wildcards.database, wildcards.receptor,
+                "compounds", wildcards.kind, wildcards.target, "plantsFiles", "run"
+            ))
 
-        ligand = os.path.join(wildcards.database, wildcards.receptor, "compounds", wildcards.kind, wildcards.target, "ligand.smi")
-        receptor = os.path.join(wildcards.database, wildcards.receptor, "receptor.pdb")
+        ligand = input.ligand
+        receptor = input.receptor
 
         # Set the base paths
         baseLigPath = os.path.dirname(ligand)
 
         # Set the boxFile
-        boxFile = f"{baseLigPath}/boxes/box0.pdb"
+        boxFile = input.box
         confFile = os.path.join(baseLigPath, "plantsFiles", "conf_plants.txt")
 
         # Set the input receptor variable
-        prepared_receptor = os.path.join(wildcards.database, wildcards.receptor, "prepared_receptor.mol2")
+        prepared_receptor = os.path.join(ocdb_path, wildcards.database, wildcards.receptor, "prepared_receptor.mol2")
 
         # If there is no box, finish the rule
         if not os.path.exists(boxFile):
