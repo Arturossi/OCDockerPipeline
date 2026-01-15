@@ -75,33 +75,32 @@ snakemake -s snakefile db_dudez --cores 8
 ```
 
 ## Snakemake Monitoring (WMS)
-Monitoring is provided via plugins. The `snakemake-monitoring` plugin provides
-the `--wms-monitor` hook used below.
+Monitoring is provided via plugins and enabled with `--logger`.
 
-1) Install Snakemake plus the monitoring plugin:
+### Live monitoring (recommended)
+1) Install the logger plugin:
 ```bash
-conda install -c conda-forge snakemake snakemake-monitoring
-```
-or
-```bash
-pip install snakemake snakemake-monitoring
+pip install snakemake-logger-plugin-snkmt
 ```
 
-2) Start the monitoring server from the plugin package. The exact command can
-vary by plugin version; use its CLI help and follow the usage it prints:
-```bash
-snakemake-monitoring --help
-```
-
-3) Run Snakemake with monitoring enabled (use the URL printed by the server):
+2) Run Snakemake with the logger enabled:
 ```bash
 snakemake -s snakefile --cores 20 --use-conda --conda-frontend mamba --keep-going \
-  --wms-monitor http://127.0.0.1:5000
+  --logger snkmt
 ```
 
-4) Open the monitor URL in your browser to watch job progress and failures.
+3) Open the snkmt dashboard URL printed in the Snakemake output.
 
 If running remotely, forward the port:
 ```bash
 ssh -L 5000:127.0.0.1:5000 user@remote-host
+```
+
+### Companion CLI views (quick status and graphs)
+These are optional but useful alongside live monitoring:
+```bash
+snakemake -s snakefile --summary
+snakemake -s snakefile --detailed-summary
+snakemake -s snakefile --dag | dot -Tpng > dag.png
+snakemake -s snakefile --rulegraph | dot -Tpng > rulegraph.png
 ```
