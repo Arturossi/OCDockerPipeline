@@ -53,6 +53,11 @@ import OCDocker.Error as ocerror
 import OCDocker.Initialise as ocinit
 from OCDocker.Config import get_config
 
+try:
+    from OCDP._version import __version__ as pipeline_version
+except Exception:
+    pipeline_version = "0+unknown"
+
 # Bootstrap OCDocker using the pipeline config to populate the shared Config object.
 pipeline_root = os.path.dirname(os.path.abspath(__file__))
 config_file = os.getenv("OCDOCKER_CONFIG", os.path.join(pipeline_root, "OCDocker.cfg"))
@@ -1452,10 +1457,21 @@ def _run_single_engine_via_api(
     box_path_obj = Path(box_path)
     boxes = _list_boxes(ligand_dir, box_path_obj, pipeline_all_boxes)
     if pipeline_all_boxes and not boxes:
-        return {"engine": engine, "job": job_name, "boxes": {}, "error": "no box*.pdb files found"}
+        return {
+            "engine": engine,
+            "job": job_name,
+            "pipeline_version": pipeline_version,
+            "boxes": {},
+            "error": "no box*.pdb files found",
+        }
 
     use_multi_boxes = pipeline_all_boxes and len(boxes) > 1
-    summary: Dict[str, Any] = {"engine": engine, "job": job_name, "boxes": {}}
+    summary: Dict[str, Any] = {
+        "engine": engine,
+        "job": job_name,
+        "pipeline_version": pipeline_version,
+        "boxes": {},
+    }
 
     for box in boxes:
         box_id = box.stem
@@ -1837,6 +1853,7 @@ def _postprocess_pipeline_box(
 
     summary = {
         "job": job_name if box_label is None else f"{job_name}_{box_label}",
+        "pipeline_version": pipeline_version,
         "engines": pipeline_engines,
         "rescoring_engines": sorted(rescoring.keys()),
         "representative_pose": str(representative_pose_path),
@@ -2261,6 +2278,7 @@ rule run_pipeline:
 
             summary = {
                 "job": job_name,
+                "pipeline_version": pipeline_version,
                 "all_boxes": True,
                 "box_summaries": per_box_summary,
             }
@@ -2277,6 +2295,7 @@ rule run_pipeline:
 
         payload = {
             "name": str(summary.get("job", job_name)),
+            "pipeline_version": summary.get("pipeline_version", pipeline_version),
             "database": wildcards.database,
             "receptor": wildcards.receptor,
             "kind": wildcards.kind,

@@ -128,6 +128,11 @@ CI dry-run DAG check:
 bash ci/test_engine_dag_dryrun.sh
 ```
 
+## Versioning
+
+- Pipeline version is defined in `OCDP/_version.py` (`__version__`).
+- The same value is written to pipeline artifacts (`engine_status/*.json`, `summary.json`, and `payload.pkl`) for traceability.
+
 ## Notes
 
 - Pipeline execution is fully API-driven; no CLI command invocation is required.
