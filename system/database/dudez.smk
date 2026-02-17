@@ -41,7 +41,7 @@ import OCDocker.Error as ocerror
 oc_config = get_config()
 ocdb_path = oc_config.paths.ocdb_path or ""
 dudez_archive = oc_config.dudez_archive or os.path.join(ocdb_path, "DUDEz")
-dudez_download = oc_config.dudez_download
+dudez_download = getattr(oc_config, "dudez_download", "") or "https://dudez.docking.org"
 overwrite = bool(config.get("overwrite", False))
 
 def get_targets(file: str) -> List[str]:

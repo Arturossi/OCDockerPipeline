@@ -1,9 +1,66 @@
 # Workflow settings
+# Keep below total hardware threads to leave headroom for DB/system tasks.
 cpu_cores: 16
 overwrite: false
 
-# Joblib settings
-joblib_backend: "threading"  # Options: "loky", "multiprocessing", "threading"
+# Database backend (required for --store-db in this pipeline)
+db_backend: "postgresql"
+
+# Target selection
+run_databases:
+  - "PDBbind"
+  - "DUDEz"
+compound_kinds:
+  - "ligands"
+  - "decoys"
+  - "compounds"
+# Target discovery:
+# - "index": use pdb_database_index/dudez_database_index only
+# - "filesystem": scan ocdb/PDBbind and ocdb/DUDEz folders only
+# - "hybrid": merge index + filesystem (recommended)
+target_discovery_mode: "hybrid"
+
+# Keep old include-based database rules disabled by default.
+enable_legacy_database_rules: false
+
+# Pipeline settings
+# Engines are auto-detected from OCDocker.cfg executables if this key is omitted.
+# Each engine is executed as an independent Snakemake job (`run_engine`),
+# enabling parallel execution and shared preparation reuse.
+# pipeline_engines: ["vina", "smina", "gnina", "plants"]
+
+# Rescoring defaults to docking engines + oddt if this key is omitted.
+# pipeline_rescoring_engines: ["vina", "smina", "gnina", "plants", "oddt"]
+pipeline_store_db: true
+
+# Engine scheduling (Snakemake threads/resources for `run_engine`)
+# Recommended production profile for this host:
+# - CPU: 20 threads
+# - RAM: 31 GiB
+# - GPU: enabled for GNINA
+pipeline_engine_threads_default: 1
+pipeline_engine_threads:
+  gnina: 2
+  vina: 1
+  smina: 1
+  plants: 1
+
+pipeline_engine_mem_mb_default: 2000
+pipeline_engine_mem_mb:
+  gnina: 7000
+  plants: 3000
+  vina: 2000
+  smina: 2000
+
+# Post-processing scheduling (`run_pipeline`)
+pipeline_postprocess_threads: 2
+pipeline_postprocess_mem_mb: 6000
+
+pipeline_cluster_min: 10.0
+pipeline_cluster_max: 20.0
+pipeline_cluster_step: 0.1
+pipeline_all_boxes: false
+# pipeline_timeout: 3600
 
 # Logging settings
 logprefix: ""
@@ -11,7 +68,7 @@ logDir: "/data/hd4tb/OCDocker/logs"
 log_level: "info"    # Options: "debug", "info", "warning", "error", "critical"
 log_handler: "file"  # Options: "file", "console", or "file_and_console"
 
-# Database settings
+# Dataset settings
 pdbbindTarGzPath: "/data/hd4tb/OCDocker/data/PDBbind_v2020_refined.tar.gz"
 pdb_database_index: "/data/hd4tb/OCDocker/data/pdbbind_proteins.txt"
 ignored_pdb_database_index: "/data/hd4tb/OCDocker/data/problematic_pdbbind_proteins.txt"
