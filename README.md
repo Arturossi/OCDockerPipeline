@@ -1,25 +1,30 @@
 # OCDockerPipeline
 
-Snakemake workflow for running OCDocker using the Python API (no CLI subprocess).
-Each ligand entry is processed with:
+Snakemake workflow for running OCDocker through the Python API (without per-target CLI subprocess calls).
+The pipeline is structured for multi-engine fan-out, shared preparation caching, and traceable post-processing.
 
-- in-process engine execution via `OCDocker.Docking` classes
-- per-engine Snakemake jobs that can run concurrently
-- shared, lock-safe preparation artifacts reused across engines
-- clustering/rescoring + PostgreSQL persistence in a downstream aggregation step
+## Overview
 
-Outputs are written under the `ocdb` root defined in `OCDocker.cfg`.
+For each `{database}/{receptor}/compounds/{kind}/{target}` entry, the workflow:
 
-## Prerequisites
+1. Validates and caches receptor preparation (`prepare_receptor_cache`).
+2. Prepares and caches ligand artifacts shared across engines (`prepare_ligand_cache`).
+3. Runs one independent `run_engine` job per selected docking engine.
+4. Aggregates in `run_pipeline`, performs clustering/rescoring, and optionally writes DB rows.
+5. Writes `summary.json`, `payload.pkl`, and `run_report.json`.
+
+Outputs are written under the `ocdb` root configured in `OCDocker.cfg`.
+
+## Requirements
 
 - Python environment with Snakemake.
 - OCDocker installed in the same environment.
-- External tools configured in `OCDocker.cfg` (Vina, Smina, Gnina, PLANTS, MGLTools/OpenBabel, etc.).
+- External tools configured in `OCDocker.cfg` (`vina`, `smina`, `gnina`, `plants`, OpenBabel/MGLTools, etc.).
 - PostgreSQL configured in `OCDocker.cfg` (`HOST`, `USER`, `PASSWORD`, `DATABASE`, `PORT`).
 
 ## Installation
 
-1. Create the pipeline environment:
+1. Create the environment:
 
 ```bash
 conda env create -f envs/ocdocker.yaml
@@ -36,26 +41,34 @@ pip install -e ../OCDocker
 
 ### `config.yaml`
 
-- `db_backend`: must be `postgresql` (the Snakefile enforces this).
+Core keys:
+
+- `db_backend`: must be `postgresql`.
 - `run_databases`: databases to process (`PDBbind`, `DUDEz`).
 - `compound_kinds`: kinds to process (`ligands`, `decoys`, `compounds`).
+- `target_discovery_mode`: `index`, `filesystem`, or `hybrid`.
+- `pipeline_engines`: optional explicit docking engines.
+- `pipeline_rescoring_engines`: optional explicit rescoring engines.
+- `pipeline_store_db`: enable/disable DB writes.
 - `pipeline_cluster_min`, `pipeline_cluster_max`, `pipeline_cluster_step`.
-- `pipeline_all_boxes`, `pipeline_timeout` (optional).
-- `pipeline_engine_threads*`, `pipeline_engine_mem_mb*` to tune per-engine scheduling.
-- `pipeline_postprocess_threads`, `pipeline_postprocess_mem_mb` for aggregation stage resources.
-- Optional:
-  - `pipeline_engines`: explicit docking engines.
-  - `pipeline_rescoring_engines`: explicit rescoring engines.
+- `pipeline_all_boxes`: when `true`, process all `box*.pdb` files for each target.
+- `pipeline_timeout`: optional timeout propagated to OCDocker API calls.
+- `pipeline_engine_threads*`, `pipeline_engine_mem_mb*`: per-engine resource settings.
+- `pipeline_postprocess_threads`, `pipeline_postprocess_mem_mb`: post-processing resources.
+- `pipeline_report_include_python_packages`: include full installed package list in `run_report.json`.
 
-If `pipeline_engines` is omitted, engines are auto-detected from executable paths in `OCDocker.cfg`.
-If `pipeline_rescoring_engines` is omitted, it defaults to docking engines plus `oddt`.
+Behavior:
+
+- If `pipeline_engines` is omitted, engines are auto-detected from `OCDocker.cfg` executables.
+- If `pipeline_rescoring_engines` is omitted, it defaults to `pipeline_engines + oddt`.
 
 ### `OCDocker.cfg`
 
+Important keys:
+
 - `ocdb`: root directory for dataset storage and results.
-- Tool paths: `vina`, `smina`, `gnina`, `plants`, `prepare_ligand`, `prepare_receptor`, etc.
-- Scoring function lists as needed by OCDocker.
-- PostgreSQL connection fields (`HOST`, `USER`, `PASSWORD`, `DATABASE`, `PORT`).
+- executable paths for docking/preparation tools.
+- PostgreSQL connection fields.
 
 If `OCDocker.cfg` is not in the pipeline root, set:
 
@@ -63,38 +76,20 @@ If `OCDocker.cfg` is not in the pipeline root, set:
 export OCDOCKER_CONFIG=/path/to/OCDocker.cfg
 ```
 
-## Workflow
+## Execution Model
 
-For each `{database}/{receptor}/compounds/{kind}/{target}` entry, the workflow:
-
-1. Validates and caches receptor preparation (`prepare_receptor_cache`).
-2. Prepares and caches shared ligand artifacts (`prepare_ligand_cache`).
-3. Runs one `run_engine` job per selected engine (`vina`, `smina`, `gnina`, `plants`).
-4. Writes per-engine status files to `engine_status/{engine}.json`.
-5. Runs `run_pipeline` to aggregate engine outputs, cluster poses, select representative pose, and rescore.
-6. Stores descriptors/scores in PostgreSQL and writes `summary.json` + `payload.pkl`.
-
-## Execution model
-
-DAG for one target:
+DAG per target:
 
 - `prepare_receptor_cache`
 - `prepare_ligand_cache`
-- `run_engine[vina]`, `run_engine[smina]`, `run_engine[gnina]`, `run_engine[plants]` (subset depends on `pipeline_engines`)
-- `run_pipeline` (fan-in from all generated `engine_status/*.json`)
+- `run_engine[...]` (one job per selected engine)
+- `run_pipeline` (fan-in from `engine_status/*.json`)
 
-Because engines are separate jobs, they can run at the same time when `--cores` allows it.
-
-## Cache and concurrency
-
-- Receptor preparation cache is keyed by pipeline settings and receptor metadata.
-- Shared preparation files use lock files (`.prepared_*.lock`) to avoid race conditions.
-- Each engine writes to isolated engine output folders and its own `engine_status/{engine}.json`.
-- This avoids duplicated preparation work while keeping engine execution parallel.
+Because engines are independent jobs, they can run concurrently when `--cores` allows.
 
 ## Run
 
-Dry run:
+Dry-run:
 
 ```bash
 snakemake -s snakefile -n --cores 1
@@ -106,14 +101,13 @@ Execute:
 snakemake -s snakefile --cores 16 --use-conda --conda-frontend mamba --keep-going
 ```
 
-Recommended production run (this host profile, GNINA GPU enabled):
+Recommended production shape on this host:
 
 ```bash
 snakemake -s snakefile --cores 16 --resources mem_mb=28000 --use-conda --conda-frontend mamba --keep-going
 ```
 
-Why `--resources mem_mb=28000`: rule-level `mem_mb` values are applied only when a global
-resource budget is provided; this keeps concurrent engine jobs within RAM capacity.
+Why `--resources mem_mb=28000`: rule-level `mem_mb` limits are enforced only when a global resource budget is provided.
 
 Database-only target preparation:
 
@@ -122,20 +116,42 @@ snakemake -s snakefile db_pdbbind --cores 8
 snakemake -s snakefile db_dudez --cores 8
 ```
 
-CI dry-run DAG check:
+CI dry-run check:
 
 ```bash
 bash ci/test_engine_dag_dryrun.sh
 ```
 
+## Outputs
+
+Per target (`ocdb/<database>/<receptor>/compounds/<kind>/<target>/`):
+
+- `engine_status/<engine>.json`: per-engine execution summary.
+- `summary.json` (or `box*/summary.json` with `pipeline_all_boxes: true`): post-processing summary.
+- `payload.pkl`: main target artifact used by Snakemake rules.
+- `run_report.json`: reproducibility report for the target.
+
+## Reproducibility Report
+
+`run_report.json` is generated in `run_pipeline` for every target and records:
+
+- job identity and pipeline version/cache key.
+- workflow/config fingerprints and effective runtime config hash.
+- Python/platform/runtime environment and pipeline git metadata.
+- fingerprints of key inputs/outputs (size, mtime, SHA256 where applicable).
+- canonical SHA256 digest of the final `summary` payload.
+- OCDocker reproducibility manifest (tools/runtime/git), with optional full package list.
+
+This report is meant to support provenance tracking and reproducible reruns.
+
 ## Versioning
 
 - Pipeline version is defined in `OCDP/_version.py` (`__version__`).
-- The same value is written to pipeline artifacts (`engine_status/*.json`, `summary.json`, and `payload.pkl`) for traceability.
+- The same value is propagated to `engine_status/*.json`, `summary.json`, `payload.pkl`, and `run_report.json`.
 
 ## Notes
 
-- Pipeline execution is fully API-driven; no CLI command invocation is required.
-- Receptor preparation is cached per receptor and reused across ligand targets.
-- Per-engine summaries are explicit pipeline artifacts and can be inspected independently.
-- Database writes are done through OCDocker DB models during post-processing.
+- Pipeline execution is fully API-driven.
+- Receptor preparation is cached per receptor and reused across targets.
+- Shared preparation files use lock files (`.prepared_*.lock`) to avoid race conditions.
+- Database writes are handled through OCDocker DB models during post-processing.

@@ -24,9 +24,14 @@ import math
 import numbers
 import os
 import pickle
+import platform
 import shutil
+import socket
+import subprocess
+import sys
 
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from glob import glob
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -177,6 +182,213 @@ def _normalize_exit_code(result):
         return int(result)
     except (TypeError, ValueError):
         return 1
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _utc_iso_from_timestamp(value: float) -> str:
+    return datetime.fromtimestamp(value, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _sha256_text(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _sha256_file(path: Union[str, Path]) -> Optional[str]:
+    file_path = Path(path)
+    if not file_path.is_file():
+        return None
+
+    digest = hashlib.sha256()
+    with file_path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _to_jsonable(value: Any) -> Any:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+
+    if isinstance(value, dict):
+        return {str(key): _to_jsonable(inner) for key, inner in value.items()}
+
+    if isinstance(value, (list, tuple, set)):
+        return [_to_jsonable(inner) for inner in value]
+
+    return str(value)
+
+
+def _json_sha256(payload: Any) -> str:
+    normalized = _to_jsonable(payload)
+    text = json.dumps(normalized, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return _sha256_text(text)
+
+
+def _file_fingerprint(path: Union[str, Path], include_sha256: bool = True) -> Dict[str, Any]:
+    file_path = Path(path)
+    payload: Dict[str, Any] = {
+        "path": str(file_path),
+        "exists": file_path.exists(),
+    }
+    if not file_path.exists():
+        return payload
+
+    stat_info = file_path.stat()
+    payload["is_file"] = file_path.is_file()
+    payload["size_bytes"] = int(stat_info.st_size)
+    payload["mtime_utc"] = _utc_iso_from_timestamp(stat_info.st_mtime)
+    if include_sha256 and file_path.is_file():
+        payload["sha256"] = _sha256_file(file_path)
+    return payload
+
+
+def _run_git(repo_root: Union[str, Path], args: List[str]) -> Optional[str]:
+    root = Path(repo_root)
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(root), *args],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=3,
+        )
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+
+    if completed.returncode != 0:
+        return None
+
+    output = completed.stdout.strip()
+    return output if output else None
+
+
+def _collect_git_manifest(repo_root: Union[str, Path]) -> Dict[str, Optional[Union[str, bool]]]:
+    commit = _run_git(repo_root, ["rev-parse", "HEAD"])
+    branch = _run_git(repo_root, ["rev-parse", "--abbrev-ref", "HEAD"])
+    status = _run_git(repo_root, ["status", "--porcelain"])
+    return {
+        "commit": commit,
+        "branch": branch,
+        "dirty": bool(status) if status is not None else None,
+    }
+
+
+def _generate_run_report(
+    *,
+    job_name: str,
+    database: str,
+    receptor: str,
+    kind: str,
+    target: str,
+    receptor_path: Union[str, Path],
+    ligand_path: Union[str, Path],
+    box_path: Union[str, Path],
+    engine_summary_paths: List[str],
+    summary: Dict[str, Any],
+    summary_path: Optional[Union[str, Path]],
+    per_box_summary_paths: List[Union[str, Path]],
+    payload_path: Union[str, Path],
+    report_path: Union[str, Path],
+) -> Dict[str, Any]:
+    try:
+        import OCDocker.Toolbox.Reproducibility as ocrepro
+
+        ocdocker_manifest = ocrepro.generate_reproducibility_manifest(
+            include_python_packages=pipeline_report_include_python_packages
+        )
+        ocdocker_manifest_error: Optional[str] = None
+    except Exception as exc:
+        ocdocker_manifest = {}
+        ocdocker_manifest_error = f"{type(exc).__name__}: {exc}"
+
+    repo_root = Path(pipeline_root).resolve()
+    snakefile_path = repo_root / "snakefile"
+    pipeline_config_path = repo_root / "config.yaml"
+    ocdocker_config_path = Path(config_file)
+    config_snapshot = _to_jsonable(config)
+
+    report_payload = {
+        "schema_version": 1,
+        "generated_at_utc": _utc_now_iso(),
+        "job": {
+            "name": job_name,
+            "database": database,
+            "receptor": receptor,
+            "kind": kind,
+            "target": target,
+        },
+        "pipeline": {
+            "name": "OCDockerPipeline",
+            "version": pipeline_version,
+            "workflow_root": str(repo_root),
+            "cache_key": pipeline_cache_key,
+            "snakefile": _file_fingerprint(snakefile_path),
+            "pipeline_config_yaml": _file_fingerprint(pipeline_config_path),
+            "ocdocker_config": _file_fingerprint(ocdocker_config_path),
+            "effective_config_sha256": _json_sha256(config_snapshot),
+            "effective_config": config_snapshot,
+            "settings": {
+                "engines": list(pipeline_engines),
+                "rescoring_engines": list(pipeline_rescoring_engines),
+                "cluster": {
+                    "min": pipeline_cluster_min,
+                    "max": pipeline_cluster_max,
+                    "step": pipeline_cluster_step,
+                },
+                "all_boxes": pipeline_all_boxes,
+                "timeout": pipeline_timeout,
+                "store_db": pipeline_store_db,
+                "report_include_python_packages": pipeline_report_include_python_packages,
+            },
+        },
+        "runtime": {
+            "python": {
+                "version": platform.python_version(),
+                "implementation": platform.python_implementation(),
+                "executable": sys.executable,
+            },
+            "platform": {
+                "system": platform.system(),
+                "release": platform.release(),
+                "machine": platform.machine(),
+                "processor": platform.processor(),
+            },
+            "host": socket.gethostname(),
+            "working_directory": os.getcwd(),
+            "git": _collect_git_manifest(repo_root),
+            "environment": {
+                "OCDOCKER_CONFIG": os.getenv("OCDOCKER_CONFIG"),
+                "OCDOCKER_DB_BACKEND": os.getenv("OCDOCKER_DB_BACKEND"),
+                "DB_BACKEND": os.getenv("DB_BACKEND"),
+                "OCDOCKER_SQLITE_PATH": os.getenv("OCDOCKER_SQLITE_PATH"),
+                "OCDOCKER_TIMEOUT": os.getenv("OCDOCKER_TIMEOUT"),
+            },
+        },
+        "inputs": {
+            "receptor": _file_fingerprint(receptor_path),
+            "ligand": _file_fingerprint(ligand_path),
+            "box": _file_fingerprint(box_path),
+            "engine_summaries": [_file_fingerprint(path) for path in sorted(engine_summary_paths)],
+        },
+        "outputs": {
+            "summary": _file_fingerprint(summary_path) if summary_path is not None else None,
+            "box_summaries": [_file_fingerprint(path) for path in sorted(per_box_summary_paths)],
+            "payload": _file_fingerprint(payload_path),
+            "run_report": {
+                "path": str(report_path),
+            },
+        },
+        "summary_sha256": _json_sha256(summary),
+        "ocdocker_manifest": _to_jsonable(ocdocker_manifest),
+    }
+
+    if ocdocker_manifest_error:
+        report_payload["ocdocker_manifest_error"] = ocdocker_manifest_error
+
+    return report_payload
 
 
 @contextmanager
@@ -926,6 +1138,10 @@ pipeline_cluster_max = float(config.get("pipeline_cluster_max", 20.0))
 pipeline_cluster_step = float(config.get("pipeline_cluster_step", 0.1))
 pipeline_all_boxes = _as_bool(config.get("pipeline_all_boxes", False), default=False)
 pipeline_store_db = _as_bool(config.get("pipeline_store_db", True), default=True)
+pipeline_report_include_python_packages = _as_bool(
+    config.get("pipeline_report_include_python_packages", False),
+    default=False,
+)
 
 
 def _parse_engine_int_map(value: Any) -> Dict[str, int]:
@@ -2190,7 +2406,7 @@ rule run_engine:
 
 rule run_pipeline:
     """
-    Aggregate per-engine outputs, run clustering/rescoring, and write payload.
+    Aggregate per-engine outputs, run clustering/rescoring, and write payload/report.
 
     The docking stage is intentionally delegated to ``run_engine`` jobs so this
     rule only performs post-processing and DB persistence.
@@ -2233,6 +2449,15 @@ rule run_pipeline:
             "{target}",
             "payload.pkl",
         ),
+        run_report=os.path.join(
+            ocdb_path,
+            "{database}",
+            "{receptor}",
+            "compounds",
+            "{kind}",
+            "{target}",
+            "run_report.json",
+        ),
     threads: pipeline_postprocess_threads
     resources:
         mem_mb=pipeline_postprocess_mem_mb
@@ -2261,12 +2486,16 @@ rule run_pipeline:
             )
 
         summary_path = target_dir / "summary.json"
+        summary_output_path: Optional[Path] = None
+        per_box_summary_paths: List[Path] = []
         if summary_path.exists():
             with summary_path.open("r", encoding="utf-8") as handle:
                 summary = json.load(handle)
+            summary_output_path = summary_path
         elif pipeline_all_boxes:
             per_box_summary = {}
             for box_summary_path in sorted(target_dir.glob("box*/summary.json")):
+                per_box_summary_paths.append(box_summary_path)
                 with box_summary_path.open("r", encoding="utf-8") as handle:
                     per_box_summary[box_summary_path.parent.name] = json.load(handle)
 
@@ -2301,11 +2530,32 @@ rule run_pipeline:
             "kind": wildcards.kind,
             "target": wildcards.target,
             "representative_pose": representative_pose,
+            "run_report": str(output.run_report),
             "summary": summary,
         }
 
         with open(output.payload, "wb") as handle:
             pickle.dump(payload, handle)
+
+        run_report = _generate_run_report(
+            job_name=job_name,
+            database=wildcards.database,
+            receptor=wildcards.receptor,
+            kind=wildcards.kind,
+            target=wildcards.target,
+            receptor_path=str(input.receptor),
+            ligand_path=str(input.ligand),
+            box_path=str(input.box),
+            engine_summary_paths=list(input.engine_summaries),
+            summary=summary,
+            summary_path=summary_output_path,
+            per_box_summary_paths=[str(path) for path in per_box_summary_paths],
+            payload_path=str(output.payload),
+            report_path=str(output.run_report),
+        )
+        report_path = Path(str(output.run_report))
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(json.dumps(run_report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
 rule all:

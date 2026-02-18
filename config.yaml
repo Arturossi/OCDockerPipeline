@@ -32,6 +32,9 @@ enable_legacy_database_rules: false
 # Rescoring defaults to docking engines + oddt if this key is omitted.
 # pipeline_rescoring_engines: ["vina", "smina", "gnina", "plants", "oddt"]
 pipeline_store_db: true
+# Include full installed Python package list in run_report.json.
+# Keep false for large production runs unless you explicitly need package-level provenance.
+pipeline_report_include_python_packages: false
 
 # Engine scheduling (Snakemake threads/resources for `run_engine`)
 # Recommended production profile for this host:
