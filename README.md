@@ -13,7 +13,7 @@ For each `{database}/{receptor}/compounds/{kind}/{target}` entry, the workflow:
 4. Aggregates in `run_pipeline`, performs clustering/rescoring, and optionally writes DB rows.
 5. Writes `summary.json`, `payload.pkl`, and `run_report.json`.
 
-Outputs are written under the `ocdb` root configured in `OCDocker.cfg`.
+Outputs are addressed under `<ocdb>/<alias>/...`; for custom path sources, that alias is mounted to the external directory.
 
 ## Requirements
 
@@ -44,7 +44,7 @@ pip install -e ../OCDocker
 Core keys:
 
 - `db_backend`: must be `postgresql`.
-- `run_databases`: databases to process (`PDBbind`, `DUDEz`).
+- `database_sources`: databases to process (preset names or custom paths).
 - `compound_kinds`: kinds to process (`ligands`, `decoys`, `compounds`).
 - `target_discovery_mode`: `index`, `filesystem`, or `hybrid`.
 - `pipeline_engines`: optional explicit docking engines.
@@ -52,6 +52,7 @@ Core keys:
 - `pipeline_store_db`: enable/disable DB writes.
 - `pipeline_cluster_min`, `pipeline_cluster_max`, `pipeline_cluster_step`.
 - `pipeline_all_boxes`: when `true`, process all `box*.pdb` files for each target.
+- `pipeline_discovery_cache`: cache target discovery metadata in `.snakemake/` (enabled by default).
 - `pipeline_timeout`: optional timeout propagated to OCDocker API calls.
 - `pipeline_engine_threads*`, `pipeline_engine_mem_mb*`: per-engine resource settings.
 - `pipeline_postprocess_threads`, `pipeline_postprocess_mem_mb`: post-processing resources.
@@ -59,8 +60,38 @@ Core keys:
 
 Behavior:
 
+- `database_sources` supports:
+  - preset names: `PDBbind`, `DUDEz`
+  - alias under `ocdb`: `other` (resolved as `<ocdb>/other`)
+  - explicit path: `/abs/path/to/MyDB` (alias becomes folder name)
+  - alias + path: `mydb=/abs/path/to/MyDB`
+- if `database_sources` is omitted, legacy `run_databases` is still supported.
+- `target_discovery_mode=index` is valid only for preset aliases (`PDBbind`, `DUDEz`).
 - If `pipeline_engines` is omitted, engines are auto-detected from `OCDocker.cfg` executables.
 - If `pipeline_rescoring_engines` is omitted, it defaults to `pipeline_engines + oddt`.
+
+Common selections:
+
+- Run only preset `PDBbind`:
+  - `database_sources: ["PDBbind"]`
+- Run only preset `DUDEz`:
+  - `database_sources: ["DUDEz"]`
+- Run local `ocdb/other`:
+  - `database_sources: ["other"]`
+- Run custom directory with explicit alias:
+  - `database_sources: ["mydb=/data/hd4tb/OCDocker/data/ocdb/MyCustomDB"]`
+- Run custom directory with inferred alias from folder name:
+  - `database_sources: ["/data/hd4tb/OCDocker/data/ocdb/MyCustomDB"]`
+
+Example:
+
+```yaml
+database_sources:
+  - "PDBbind"
+  - "DUDEz"
+  - "other"
+  - "mydb=/data/hd4tb/OCDocker/data/ocdb/MyCustomDB"
+```
 
 ### `OCDocker.cfg`
 
@@ -86,6 +117,7 @@ DAG per target:
 - `run_pipeline` (fan-in from `engine_status/*.json`)
 
 Because engines are independent jobs, they can run concurrently when `--cores` allows.
+When `pipeline_all_boxes: true`, each `run_engine`/`run_pipeline` job can also fan out across boxes up to the rule `threads` value.
 
 ## Run
 
@@ -122,9 +154,33 @@ CI dry-run check:
 bash ci/test_engine_dag_dryrun.sh
 ```
 
+Real smoke test (non-mocked, using real fixture files):
+
+```bash
+bash test_files/test_engine_smoke_real.sh --engine plants --keep-workdir
+```
+
+- Fixture source: `test_files/test_ptn1`
+- Output root (printed by script): `<work_root>/ocdb/PDBbind/test_ptn1/compounds/ligands/ligand/`
+
+How to read smoke-test outputs:
+
+- `engine_status/<engine>.json`: per-box execution status and generated poses.
+- `summary.json`: final clustering and rescoring results, including representative pose.
+- `payload.pkl`: serialized pipeline artifact used by downstream rules.
+- `run_report.json`: reproducibility manifest (inputs/outputs fingerprints, runtime/tool versions, `summary_sha256`).
+
+Delete generated files (keep fixture inputs):
+
+```bash
+bash test_files/clean_smoke_outputs.sh /path/to/work_root/ocdb/PDBbind/test_ptn1
+```
+
+Tip: add `--clean` to `test_files/test_engine_smoke_real.sh` to auto-clean after a successful run.
+
 ## Outputs
 
-Per target (`ocdb/<database>/<receptor>/compounds/<kind>/<target>/`):
+Per target (`<database_root>/<receptor>/compounds/<kind>/<target>/`):
 
 - `engine_status/<engine>.json`: per-engine execution summary.
 - `summary.json` (or `box*/summary.json` with `pipeline_all_boxes: true`): post-processing summary.

@@ -18,6 +18,7 @@ configfile: "config.yaml"
 # Python functions and imports
 ###############################################################################
 import argparse
+import copy
 import hashlib
 import json
 import math
@@ -25,13 +26,17 @@ import numbers
 import os
 import pickle
 import platform
+import re
 import shutil
 import socket
 import subprocess
 import sys
+import threading
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from datetime import datetime, timezone
+from functools import lru_cache
 from glob import glob
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -64,7 +69,11 @@ except Exception:
     pipeline_version = "0+unknown"
 
 # Bootstrap OCDocker using the pipeline config to populate the shared Config object.
-pipeline_root = os.path.dirname(os.path.abspath(__file__))
+if "workflow" in globals() and getattr(workflow, "basedir", None):
+    pipeline_root = str(Path(workflow.basedir).resolve())
+else:
+    pipeline_root = os.path.dirname(os.path.abspath(__file__))
+pipeline_source_root = Path(pipeline_root).resolve()
 config_file = os.getenv("OCDOCKER_CONFIG", os.path.join(pipeline_root, "OCDocker.cfg"))
 os.environ["OCDOCKER_CONFIG"] = config_file
 log_level = str(config.get("log_level", "info")).lower()
@@ -95,6 +104,9 @@ if not ocdb_path:
 ###############################################################################
 
 cpu_cores = config["cpu_cores"]
+_db_tables_initialized = False
+_db_tables_init_lock = threading.Lock()
+_db_write_lock = threading.Lock()
 
 
 def _as_bool(value: Any, default: bool = False) -> bool:
@@ -276,6 +288,64 @@ def _collect_git_manifest(repo_root: Union[str, Path]) -> Dict[str, Optional[Uni
     }
 
 
+def _runtime_cache_root() -> Path:
+    """Return a writable cache root for runtime metadata/sentinels."""
+
+    primary = Path(os.getcwd()) / ".snakemake"
+    try:
+        primary.mkdir(parents=True, exist_ok=True)
+        return primary
+    except OSError:
+        fallback = Path("/tmp") / "ocdockerpipeline_snakemake_cache"
+        fallback.mkdir(parents=True, exist_ok=True)
+        return fallback
+
+
+def _set_command_option(cmd: Any, flag: str, value: Union[str, int]) -> None:
+    """Set or append CLI option ``flag value`` on command lists."""
+
+    if not isinstance(cmd, list):
+        return
+
+    value_text = str(value)
+    idx = 0
+    while idx < len(cmd):
+        if cmd[idx] == flag:
+            if idx + 1 < len(cmd):
+                cmd[idx + 1] = value_text
+            else:
+                cmd.append(value_text)
+            return
+        idx += 1
+
+    cmd.extend([flag, value_text])
+
+
+def _apply_engine_cpu_hint(engine: str, runner: Any, threads_hint: int) -> None:
+    """Align engine ``--cpu`` arguments with Snakemake thread scheduling."""
+
+    cpu_threads = max(1, int(threads_hint))
+    if engine == "vina":
+        _set_command_option(getattr(runner, "vina_cmd", None), "--cpu", cpu_threads)
+    elif engine == "smina":
+        _set_command_option(getattr(runner, "smina_cmd", None), "--cpu", cpu_threads)
+    elif engine == "gnina":
+        _set_command_option(getattr(runner, "gnina_cmd", None), "--cpu", cpu_threads)
+
+
+@lru_cache(maxsize=2)
+def _cached_reproducibility_manifest(include_python_packages: bool) -> Tuple[Dict[str, Any], Optional[str]]:
+    """Collect reproducibility manifest once per interpreter process."""
+
+    try:
+        import OCDocker.Toolbox.Reproducibility as ocrepro
+
+        manifest = ocrepro.generate_reproducibility_manifest(include_python_packages=include_python_packages)
+        return copy.deepcopy(_to_jsonable(manifest)), None
+    except Exception as exc:
+        return {}, f"{type(exc).__name__}: {exc}"
+
+
 def _generate_run_report(
     *,
     job_name: str,
@@ -293,22 +363,20 @@ def _generate_run_report(
     payload_path: Union[str, Path],
     report_path: Union[str, Path],
 ) -> Dict[str, Any]:
-    try:
-        import OCDocker.Toolbox.Reproducibility as ocrepro
+    ocdocker_manifest, ocdocker_manifest_error = _cached_reproducibility_manifest(
+        pipeline_report_include_python_packages
+    )
 
-        ocdocker_manifest = ocrepro.generate_reproducibility_manifest(
-            include_python_packages=pipeline_report_include_python_packages
-        )
-        ocdocker_manifest_error: Optional[str] = None
-    except Exception as exc:
-        ocdocker_manifest = {}
-        ocdocker_manifest_error = f"{type(exc).__name__}: {exc}"
-
-    repo_root = Path(pipeline_root).resolve()
+    repo_root = pipeline_source_root
     snakefile_path = repo_root / "snakefile"
     pipeline_config_path = repo_root / "config.yaml"
     ocdocker_config_path = Path(config_file)
     config_snapshot = _to_jsonable(config)
+    git_manifest = _collect_git_manifest(repo_root)
+    if isinstance(ocdocker_manifest, dict):
+        manifest_git = ocdocker_manifest.get("git")
+        if isinstance(manifest_git, dict) and manifest_git:
+            git_manifest = manifest_git
 
     report_payload = {
         "schema_version": 1,
@@ -316,6 +384,7 @@ def _generate_run_report(
         "job": {
             "name": job_name,
             "database": database,
+            "database_root": str(_database_root_path(database)),
             "receptor": receptor,
             "kind": kind,
             "target": target,
@@ -342,6 +411,7 @@ def _generate_run_report(
                 "timeout": pipeline_timeout,
                 "store_db": pipeline_store_db,
                 "report_include_python_packages": pipeline_report_include_python_packages,
+                "database_source": _to_jsonable(database_specs.get(database, {})),
             },
         },
         "runtime": {
@@ -358,7 +428,7 @@ def _generate_run_report(
             },
             "host": socket.gethostname(),
             "working_directory": os.getcwd(),
-            "git": _collect_git_manifest(repo_root),
+            "git": git_manifest,
             "environment": {
                 "OCDOCKER_CONFIG": os.getenv("OCDOCKER_CONFIG"),
                 "OCDOCKER_DB_BACKEND": os.getenv("OCDOCKER_DB_BACKEND"),
@@ -575,57 +645,86 @@ def _flatten_rescoring_to_complex_payload(rescoring: Dict[str, Dict[str, float]]
 
 def _ensure_db_runtime() -> None:
     import OCDocker.Initialise as ocinit_runtime
+    from OCDocker.DB.DB import create_tables
     from OCDocker.DB.DBMinimal import create_database_if_not_exists, create_engine, create_session
     from sqlalchemy.engine import URL
 
-    if getattr(ocinit_runtime, "session", None) is not None:
-        return
+    global _db_tables_initialized
 
-    runtime_config = get_config()
-    backend = str(getattr(runtime_config.database, "backend", "postgresql") or "postgresql").strip().lower()
-    backend = "postgresql" if backend in {"postgres", "postgresql", "psql"} else backend
+    if getattr(ocinit_runtime, "session", None) is None:
+        runtime_config = get_config()
+        backend = str(getattr(runtime_config.database, "backend", "postgresql") or "postgresql").strip().lower()
+        backend = "postgresql" if backend in {"postgres", "postgresql", "psql"} else backend
 
-    if backend == "sqlite":
-        sqlite_path = str(getattr(runtime_config.database, "sqlite_path", "") or "").strip()
-        if not sqlite_path:
-            sqlite_path = str(Path(pipeline_root) / "ocdocker_pipeline.sqlite")
-        db_url = URL.create(drivername="sqlite", database=sqlite_path)
-    else:
-        if backend == "mysql":
-            drivername = "mysql+pymysql"
-            default_port = 3306
+        if backend == "sqlite":
+            sqlite_path = str(getattr(runtime_config.database, "sqlite_path", "") or "").strip()
+            if not sqlite_path:
+                sqlite_path = str(pipeline_source_root / "ocdocker_pipeline.sqlite")
+            db_url = URL.create(drivername="sqlite", database=sqlite_path)
         else:
-            drivername = "postgresql+psycopg"
-            default_port = 5432
+            if backend == "mysql":
+                drivername = "mysql+pymysql"
+                default_port = 3306
+            else:
+                drivername = "postgresql+psycopg"
+                default_port = 5432
 
-        host = str(getattr(runtime_config.database, "host", "") or "").strip()
-        user = str(getattr(runtime_config.database, "user", "") or "").strip()
-        password = str(getattr(runtime_config.database, "password", "") or "").strip()
-        database = str(getattr(runtime_config.database, "database", "") or "").strip()
-        port = int(getattr(runtime_config.database, "port", 0) or default_port)
+            host = str(getattr(runtime_config.database, "host", "") or "").strip()
+            user = str(getattr(runtime_config.database, "user", "") or "").strip()
+            password = str(getattr(runtime_config.database, "password", "") or "").strip()
+            database = str(getattr(runtime_config.database, "database", "") or "").strip()
+            port = int(getattr(runtime_config.database, "port", 0) or default_port)
 
-        if not host or not user or not password or not database:
-            raise RuntimeError(
-                "Database settings are incomplete in OCDocker.cfg. "
-                "Required: host, user, password, database."
+            if not host or not user or not password or not database:
+                raise RuntimeError(
+                    "Database settings are incomplete in OCDocker.cfg. "
+                    "Required: host, user, password, database."
+                )
+
+            db_url = URL.create(
+                drivername=drivername,
+                host=host,
+                username=user,
+                password=password,
+                database=database,
+                port=port,
             )
 
-        db_url = URL.create(
-            drivername=drivername,
-            host=host,
-            username=user,
-            password=password,
-            database=database,
-            port=port,
-        )
+        engine = create_engine(db_url)
+        create_database_if_not_exists(engine.url)
+        session_factory = create_session(engine)
 
-    engine = create_engine(db_url)
-    create_database_if_not_exists(engine.url)
-    session_factory = create_session(engine)
+        ocinit_runtime.db_url = db_url
+        ocinit_runtime.engine = engine
+        ocinit_runtime.session = session_factory
 
-    ocinit_runtime.db_url = db_url
-    ocinit_runtime.engine = engine
-    ocinit_runtime.session = session_factory
+    if _db_tables_initialized:
+        return
+
+    schema_dir = _runtime_cache_root()
+    schema_dir.mkdir(parents=True, exist_ok=True)
+    schema_lock_path = schema_dir / "pipeline_db_schema.lock"
+    schema_ready_path = schema_dir / "pipeline_db_schema.ready"
+    db_signature = _sha256_text(str(getattr(ocinit_runtime, "db_url", "")))
+
+    with _db_tables_init_lock:
+        if _db_tables_initialized:
+            return
+
+        with _file_lock(schema_lock_path):
+            if schema_ready_path.is_file():
+                try:
+                    cached_signature = schema_ready_path.read_text(encoding="utf-8").splitlines()[0].strip()
+                except Exception:
+                    cached_signature = ""
+                if cached_signature == db_signature:
+                    _db_tables_initialized = True
+                    return
+
+            create_tables()
+            schema_ready_path.write_text(f"{db_signature}\n{_utc_now_iso()}\n", encoding="utf-8")
+
+        _db_tables_initialized = True
 
 
 def _store_pipeline_results_in_db(
@@ -637,45 +736,43 @@ def _store_pipeline_results_in_db(
 ) -> Tuple[bool, str, List[str]]:
     _ensure_db_runtime()
 
-    from OCDocker.DB.DB import create_tables
     from OCDocker.DB.Models.Complexes import Complexes
     from OCDocker.DB.Models.Ligands import Ligands
     from OCDocker.DB.Models.Receptors import Receptors
 
-    create_tables()
-
     receptor_name = str(getattr(receptor, "name", "") or f"{job_name}_receptor")
     ligand_name = str(getattr(ligand, "name", "") or f"{job_name}_ligand")
-
-    receptor_payload: Dict[str, Union[str, int, float]] = {"name": receptor_name}
-    receptor_payload.update(_collect_numeric_descriptors(receptor, list(getattr(Receptors, "allDescriptors", []))))
-
-    ligand_payload: Dict[str, Union[str, int, float]] = {"name": ligand_name}
-    ligand_payload.update(_collect_numeric_descriptors(ligand, list(getattr(Ligands, "allDescriptors", []))))
-
-    receptor_ok = Receptors.insert_or_update(receptor_payload)
-    ligand_ok = Ligands.insert_or_update(ligand_payload)
-    if not receptor_ok or not ligand_ok:
-        return False, "", []
-
-    receptor_row = Receptors.find_first(receptor_name)
-    ligand_row = Ligands.find_first(ligand_name)
-
-    receptor_id = getattr(receptor_row, "id", None)
-    ligand_id = getattr(ligand_row, "id", None)
-
     complex_name = f"{job_name}_{box_label}" if box_label else job_name
-    complex_payload: Dict[str, Union[str, int, float]] = {"name": complex_name}
-    if isinstance(receptor_id, int):
-        complex_payload["receptor_id"] = receptor_id
-    if isinstance(ligand_id, int):
-        complex_payload["ligand_id"] = ligand_id
 
-    score_payload, ignored_keys = _flatten_rescoring_to_complex_payload(rescoring)
-    complex_payload.update(score_payload)
+    with _db_write_lock:
+        receptor_payload: Dict[str, Union[str, int, float]] = {"name": receptor_name}
+        receptor_payload.update(_collect_numeric_descriptors(receptor, list(getattr(Receptors, "allDescriptors", []))))
 
-    complex_ok = Complexes.insert_or_update(complex_payload)
-    return bool(complex_ok), complex_name, ignored_keys
+        ligand_payload: Dict[str, Union[str, int, float]] = {"name": ligand_name}
+        ligand_payload.update(_collect_numeric_descriptors(ligand, list(getattr(Ligands, "allDescriptors", []))))
+
+        receptor_ok = Receptors.insert_or_update(receptor_payload)
+        ligand_ok = Ligands.insert_or_update(ligand_payload)
+        if not receptor_ok or not ligand_ok:
+            return False, "", []
+
+        receptor_row = Receptors.find_first(receptor_name)
+        ligand_row = Ligands.find_first(ligand_name)
+
+        receptor_id = getattr(receptor_row, "id", None)
+        ligand_id = getattr(ligand_row, "id", None)
+
+        complex_payload: Dict[str, Union[str, int, float]] = {"name": complex_name}
+        if isinstance(receptor_id, int):
+            complex_payload["receptor_id"] = receptor_id
+        if isinstance(ligand_id, int):
+            complex_payload["ligand_id"] = ligand_id
+
+        score_payload, ignored_keys = _flatten_rescoring_to_complex_payload(rescoring)
+        complex_payload.update(score_payload)
+
+        complex_ok = Complexes.insert_or_update(complex_payload)
+        return bool(complex_ok), complex_name, ignored_keys
 
 
 def _canonicalize_rescore_key(engine: str, raw_key: str) -> str:
@@ -853,15 +950,7 @@ def _cached_receptor_files_present(receptor_path: Union[str, Path]) -> bool:
 def _ligand_cache_manifest_path(database: str, receptor: str, kind: str, target: str) -> str:
     """Build the ligand preparation cache manifest path for one target."""
 
-    return os.path.join(
-        ocdb_path,
-        database,
-        receptor,
-        "compounds",
-        kind,
-        target,
-        f".prepared_ligand_cache.{pipeline_cache_key}.json",
-    )
+    return str(_target_dir_path(database, receptor, kind, target) / f".prepared_ligand_cache.{pipeline_cache_key}.json")
 
 
 def _build_ligand_cache_manifest(ligand_path: Union[str, Path], target_dir: Union[str, Path]) -> Dict[str, Any]:
@@ -1138,6 +1227,7 @@ pipeline_cluster_max = float(config.get("pipeline_cluster_max", 20.0))
 pipeline_cluster_step = float(config.get("pipeline_cluster_step", 0.1))
 pipeline_all_boxes = _as_bool(config.get("pipeline_all_boxes", False), default=False)
 pipeline_store_db = _as_bool(config.get("pipeline_store_db", True), default=True)
+pipeline_discovery_cache = _as_bool(config.get("pipeline_discovery_cache", True), default=True)
 pipeline_report_include_python_packages = _as_bool(
     config.get("pipeline_report_include_python_packages", False),
     default=False,
@@ -1217,10 +1307,109 @@ pipeline_cache_key = hashlib.sha1(
     ).encode("utf-8")
 ).hexdigest()[:12]
 
-selected_databases = [_normalize_database_name(db) for db in _parse_list(config.get("run_databases"), ["PDBbind", "DUDEz"])]
-selected_databases = [db for db in selected_databases if db in {"PDBbind", "DUDEz"}]
-if not selected_databases:
-    raise RuntimeError("No valid run_databases configured. Use one or both: PDBbind, DUDEz")
+_PRESET_DATABASES = {"PDBbind", "DUDEz"}
+
+
+def _looks_like_path(value: str) -> bool:
+    text = str(value).strip()
+    if not text:
+        return False
+    if text.startswith(("~", ".", "/")):
+        return True
+    if os.sep in text:
+        return True
+    if os.altsep and os.altsep in text:
+        return True
+    return False
+
+
+def _validate_database_alias(alias: str, source: str) -> None:
+    if not alias:
+        raise RuntimeError(f"Invalid database source '{source}': empty alias.")
+    if os.sep in alias or (os.altsep and os.altsep in alias):
+        raise RuntimeError(
+            f"Invalid database alias '{alias}' from source '{source}'. "
+            "Aliases cannot contain path separators."
+        )
+
+
+def _parse_database_sources(sources: List[str]) -> Dict[str, Dict[str, Any]]:
+    specs: Dict[str, Dict[str, Any]] = {}
+    seen_aliases: Dict[str, str] = {}
+
+    for raw_source in sources:
+        source = str(raw_source).strip()
+        if not source:
+            continue
+
+        alias: str
+        target_path: Path
+
+        if "=" in source:
+            raw_alias, raw_path = source.split("=", 1)
+            alias = _normalize_database_name(raw_alias.strip())
+            _validate_database_alias(alias, source)
+
+            raw_path = raw_path.strip()
+            if not raw_path:
+                raise RuntimeError(
+                    f"Invalid database source '{source}'. Expected '<alias>=<path>' with a non-empty path."
+                )
+            target_path = Path(raw_path).expanduser().resolve()
+        else:
+            normalized = _normalize_database_name(source)
+            if normalized in _PRESET_DATABASES:
+                alias = normalized
+                target_path = Path(ocdb_path) / normalized
+            elif _looks_like_path(source):
+                target_path = Path(source).expanduser().resolve()
+                alias = _normalize_database_name(target_path.name)
+            else:
+                alias = _normalize_database_name(source)
+                target_path = Path(ocdb_path) / alias
+
+            _validate_database_alias(alias, source)
+
+        alias_key = alias.lower()
+        if alias_key in seen_aliases:
+            raise RuntimeError(
+                f"Duplicate database alias '{alias}' from source '{source}'. "
+                f"Already defined by '{seen_aliases[alias_key]}'."
+            )
+        seen_aliases[alias_key] = source
+
+        preset = alias if alias in _PRESET_DATABASES else None
+        if not target_path.exists():
+            raise RuntimeError(
+                f"Database source '{source}' resolved to '{target_path}', but this directory does not exist."
+            )
+        if not target_path.is_dir():
+            raise RuntimeError(
+                f"Database source '{source}' resolved to '{target_path}', but it is not a directory."
+            )
+
+        specs[alias] = {
+            "alias": alias,
+            "root": str(target_path),
+            "preset": preset,
+            "source": source,
+        }
+
+    if not specs:
+        raise RuntimeError(
+            "No valid database sources configured. "
+            "Set 'database_sources' (preferred) or 'run_databases' in config.yaml."
+        )
+
+    return specs
+
+
+raw_database_sources = _parse_list(config.get("database_sources"), [])
+if not raw_database_sources:
+    raw_database_sources = _parse_list(config.get("run_databases"), ["PDBbind", "DUDEz"])
+database_specs = _parse_database_sources(raw_database_sources)
+selected_databases = list(database_specs.keys())
+pipeline_databases_pattern = "|".join(re.escape(database) for database in selected_databases)
 
 selected_kinds = [kind.lower() for kind in _parse_list(config.get("compound_kinds"), ["ligands", "decoys", "compounds"])]
 selected_kinds = [kind for kind in selected_kinds if kind in {"ligands", "decoys", "compounds"}]
@@ -1237,7 +1426,102 @@ if target_discovery_mode not in valid_discovery_modes:
 
 enable_legacy_database_rules = _as_bool(config.get("enable_legacy_database_rules", False), default=False)
 
-index_targets: Dict[str, List[str]] = {"PDBbind": [], "DUDEz": []}
+preset_database_aliases: Dict[str, List[str]] = {"PDBbind": [], "DUDEz": []}
+for database, spec in database_specs.items():
+    preset_name = str(spec.get("preset", "") or "")
+    if preset_name in preset_database_aliases:
+        preset_database_aliases[preset_name].append(database)
+
+
+def _database_root_path(database: str) -> Path:
+    spec = database_specs.get(database)
+    if spec is None:
+        raise RuntimeError(f"Unknown database alias '{database}'. Check database_sources configuration.")
+    return Path(str(spec["root"]))
+
+
+database_rule_root = Path(ocdb_path).resolve()
+database_rule_root.mkdir(parents=True, exist_ok=True)
+database_rule_root_str = str(database_rule_root)
+
+
+def _prepare_database_mounts() -> None:
+    for database in selected_databases:
+        source_root = _database_root_path(database).resolve()
+        mount_path = database_rule_root / database
+
+        if mount_path.exists():
+            try:
+                if mount_path.resolve() == source_root:
+                    continue
+            except OSError:
+                pass
+
+        if mount_path.is_symlink():
+            try:
+                current_target = mount_path.resolve()
+            except OSError:
+                current_target = None
+            if current_target == source_root:
+                continue
+            mount_path.unlink()
+        elif mount_path.exists():
+            raise RuntimeError(
+                f"Database mount path '{mount_path}' already exists and is not compatible with source '{source_root}'. "
+                "Remove it or choose a different database alias."
+            )
+
+        mount_path.symlink_to(source_root, target_is_directory=True)
+
+
+_prepare_database_mounts()
+
+
+def _database_rule_root_path(database: str) -> Path:
+    return database_rule_root / database
+
+
+def _source_receptor_path(database: str, receptor: str) -> Path:
+    return _database_root_path(database) / receptor / "receptor.pdb"
+
+
+def _receptor_path(database: str, receptor: str) -> Path:
+    return _database_rule_root_path(database) / receptor / "receptor.pdb"
+
+
+def _receptor_cache_manifest_path(database: str, receptor: str) -> Path:
+    return _database_rule_root_path(database) / receptor / f".prepared_receptor_cache.{pipeline_cache_key}.json"
+
+
+def _target_dir_path(database: str, receptor: str, kind: str, target: str) -> Path:
+    return _database_rule_root_path(database) / receptor / "compounds" / kind / target
+
+
+def _ligand_path(database: str, receptor: str, kind: str, target: str) -> Path:
+    return _target_dir_path(database, receptor, kind, target) / "ligand.smi"
+
+
+def _box_path(database: str, receptor: str, kind: str, target: str) -> Path:
+    return _target_dir_path(database, receptor, kind, target) / "boxes" / "box0.pdb"
+
+
+def _payload_path(database: str, receptor: str, kind: str, target: str) -> Path:
+    return _target_dir_path(database, receptor, kind, target) / "payload.pkl"
+
+
+def _run_report_path(database: str, receptor: str, kind: str, target: str) -> Path:
+    return _target_dir_path(database, receptor, kind, target) / "run_report.json"
+
+
+custom_database_aliases = [db for db, spec in database_specs.items() if not spec.get("preset")]
+if target_discovery_mode == "index" and custom_database_aliases:
+    raise RuntimeError(
+        "target_discovery_mode=index is supported only for preset databases (PDBbind/DUDEz). "
+        "Custom database sources require target_discovery_mode=filesystem or hybrid. "
+        f"Custom sources: {', '.join(custom_database_aliases)}"
+    )
+
+index_targets: Dict[str, List[str]] = {database: [] for database in selected_databases}
 if target_discovery_mode in {"index", "hybrid"}:
     import OCDP.preload as OCDPpre
 
@@ -1246,30 +1530,38 @@ if target_discovery_mode in {"index", "hybrid"}:
     dudez_database_index = str(config.get("dudez_database_index", "") or "").strip()
     ignored_dudez_index = str(config.get("ignored_dudez_database_index", "") or "").strip()
 
-    if not pdb_database_index and target_discovery_mode == "index" and "PDBbind" in selected_databases:
+    if not pdb_database_index and target_discovery_mode == "index" and preset_database_aliases["PDBbind"]:
         raise RuntimeError("pdb_database_index is required when target_discovery_mode=index for PDBbind.")
-    if not dudez_database_index and target_discovery_mode == "index" and "DUDEz" in selected_databases:
+    if not dudez_database_index and target_discovery_mode == "index" and preset_database_aliases["DUDEz"]:
         raise RuntimeError("dudez_database_index is required when target_discovery_mode=index for DUDEz.")
 
-    if pdb_database_index:
+    pdb_index_targets: List[str] = []
+    dudez_index_targets: List[str] = []
+
+    if pdb_database_index and preset_database_aliases["PDBbind"]:
         try:
-            index_targets["PDBbind"] = OCDPpre.preload_PDBbind(pdb_database_index, ignored_pdb_index)
+            pdb_index_targets = OCDPpre.preload_PDBbind(pdb_database_index, ignored_pdb_index)
         except Exception as exc:
             if target_discovery_mode == "index":
                 raise RuntimeError(f"Failed loading PDBbind index targets: {exc}") from exc
             print(f"Warning: failed loading PDBbind index targets ({exc}). Falling back to filesystem discovery.")
 
-    if dudez_database_index:
+    if dudez_database_index and preset_database_aliases["DUDEz"]:
         try:
-            index_targets["DUDEz"] = OCDPpre.preload_DUDEz(dudez_database_index, ignored_dudez_index)
+            dudez_index_targets = OCDPpre.preload_DUDEz(dudez_database_index, ignored_dudez_index)
         except Exception as exc:
             if target_discovery_mode == "index":
                 raise RuntimeError(f"Failed loading DUDEz index targets: {exc}") from exc
             print(f"Warning: failed loading DUDEz index targets ({exc}). Falling back to filesystem discovery.")
 
+    for database in preset_database_aliases["PDBbind"]:
+        index_targets[database] = list(pdb_index_targets)
+    for database in preset_database_aliases["DUDEz"]:
+        index_targets[database] = list(dudez_index_targets)
+
 
 def _discover_receptors_from_filesystem(database: str) -> List[str]:
-    db_dir = Path(ocdb_path) / database
+    db_dir = _database_root_path(database)
     if not db_dir.exists():
         return []
 
@@ -1290,37 +1582,140 @@ def _collect_database_receptors(database: str) -> List[str]:
 
     result = sorted(set(receptors))
     if database in selected_databases and not result:
+        source = database_specs.get(database, {}).get("source", database)
         raise RuntimeError(
-            f"No receptors discovered for {database} with target_discovery_mode={target_discovery_mode}."
+            f"No receptors discovered for database '{database}' ({source}) "
+            f"with target_discovery_mode={target_discovery_mode}."
         )
     return result
 
 
-pdbbind_targets = _collect_database_receptors("PDBbind")
-dudez_targets = _collect_database_receptors("DUDEz")
+database_to_receptors: Dict[str, List[str]] = {
+    database: _collect_database_receptors(database) for database in selected_databases
+}
 
 
-def _target_inputs_exist(database: str, receptor: str, kind: str, target: str) -> bool:
-    base = Path(ocdb_path) / database / receptor / "compounds" / kind / target
-    ligand_path = base / "ligand.smi"
-    box_path = base / "boxes" / "box0.pdb"
-    receptor_path = Path(ocdb_path) / database / receptor / "receptor.pdb"
+def _target_discovery_cache_path() -> Path:
+    return _runtime_cache_root() / "target_discovery_cache.json"
 
-    return _is_valid_file(receptor_path) and _is_valid_file(ligand_path) and _is_valid_file(box_path)
+
+def _target_discovery_signature(database_to_receptors: Dict[str, List[str]]) -> str:
+    layout: List[Dict[str, Any]] = []
+    for database in selected_databases:
+        database_root = _database_root_path(database)
+        for receptor in database_to_receptors.get(database, []):
+            receptor_path = database_root / receptor / "receptor.pdb"
+            receptor_exists = receptor_path.is_file()
+            receptor_stat = receptor_path.stat() if receptor_exists else None
+            receptor_entry: Dict[str, Any] = {
+                "database": database,
+                "database_root": str(database_root),
+                "receptor": receptor,
+                "receptor_exists": receptor_exists,
+                "receptor_size": int(receptor_stat.st_size) if receptor_stat else 0,
+                "receptor_mtime_ns": int(receptor_stat.st_mtime_ns) if receptor_stat else 0,
+                "kinds": [],
+            }
+
+            compounds_dir = database_root / receptor / "compounds"
+            for kind in selected_kinds:
+                kind_dir = compounds_dir / kind
+                kind_exists = kind_dir.is_dir()
+                kind_stat = kind_dir.stat() if kind_exists else None
+                receptor_entry["kinds"].append(
+                    {
+                        "kind": kind,
+                        "path": str(kind_dir),
+                        "exists": kind_exists,
+                        "mtime_ns": int(kind_stat.st_mtime_ns) if kind_stat else 0,
+                    }
+                )
+
+            layout.append(receptor_entry)
+
+    payload = {
+        "schema_version": 1,
+        "ocdb_path": str(Path(ocdb_path).resolve()),
+        "selected_databases": list(selected_databases),
+        "database_roots": {database: str(_database_root_path(database)) for database in selected_databases},
+        "selected_kinds": list(selected_kinds),
+        "target_discovery_mode": target_discovery_mode,
+        "layout": layout,
+    }
+    return _json_sha256(payload)
+
+
+def _load_target_discovery_cache(signature: str) -> Optional[Tuple[List[str], int]]:
+    cache_path = _target_discovery_cache_path()
+    if not cache_path.is_file():
+        return None
+
+    try:
+        payload = json.loads(cache_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+    if payload.get("schema_version") != 1:
+        return None
+    if payload.get("signature") != signature:
+        return None
+
+    targets_payload = payload.get("targets")
+    if not isinstance(targets_payload, list) or not targets_payload:
+        return None
+
+    targets = [str(path) for path in targets_payload if str(path).strip()]
+    if not targets:
+        return None
+
+    try:
+        scanned = int(payload.get("scanned", 0))
+    except (TypeError, ValueError):
+        scanned = 0
+
+    return sorted(set(targets)), max(0, scanned)
+
+
+def _write_target_discovery_cache(signature: str, targets: List[str], scanned: int) -> None:
+    cache_path = _target_discovery_cache_path()
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "schema_version": 1,
+        "generated_at_utc": _utc_now_iso(),
+        "signature": signature,
+        "scanned": int(scanned),
+        "targets": sorted(set(targets)),
+    }
+
+    tmp_path = cache_path.with_suffix(".tmp")
+    tmp_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    tmp_path.replace(cache_path)
 
 
 def collect_payload_targets():
     targets = []
     scanned = 0
 
-    database_to_receptors = {
-        "PDBbind": pdbbind_targets,
-        "DUDEz": dudez_targets,
-    }
+    if pipeline_discovery_cache:
+        discovery_signature = _target_discovery_signature(database_to_receptors)
+        cached = _load_target_discovery_cache(discovery_signature)
+        if cached is not None:
+            cached_targets, cached_scanned = cached
+            print(
+                "Discovery summary: "
+                f"mode={target_discovery_mode}, scanned={cached_scanned}, valid_targets={len(cached_targets)}, cache=hit"
+            )
+            return cached_targets
+    else:
+        discovery_signature = ""
 
     for database in selected_databases:
         for receptor in database_to_receptors.get(database, []):
-            compounds_dir = Path(ocdb_path) / database / receptor / "compounds"
+            receptor_path = _source_receptor_path(database, receptor)
+            if not _is_valid_file(receptor_path):
+                continue
+
+            compounds_dir = _database_root_path(database) / receptor / "compounds"
             if not compounds_dir.is_dir():
                 continue
 
@@ -1331,20 +1726,13 @@ def collect_payload_targets():
 
                 for target_dir in sorted(path for path in kind_dir.iterdir() if path.is_dir()):
                     scanned += 1
-                    target_name = target_dir.name
-                    if not _target_inputs_exist(database, receptor, kind, target_name):
+                    ligand_path = target_dir / "ligand.smi"
+                    box_path = target_dir / "boxes" / "box0.pdb"
+                    if not _is_valid_file(ligand_path) or not _is_valid_file(box_path):
                         continue
 
                     targets.append(
-                        str(
-                            Path(ocdb_path)
-                            / database
-                            / receptor
-                            / "compounds"
-                            / kind
-                            / target_name
-                            / "payload.pkl"
-                        )
+                        str(_payload_path(database, receptor, kind, target_dir.name))
                     )
 
     unique_targets = sorted(set(targets))
@@ -1354,9 +1742,12 @@ def collect_payload_targets():
             "Checked selected databases/kinds and required files: receptor.pdb, ligand.smi, boxes/box0.pdb."
         )
 
+    if pipeline_discovery_cache:
+        _write_target_discovery_cache(discovery_signature, unique_targets, scanned)
+
     print(
         "Discovery summary: "
-        f"mode={target_discovery_mode}, scanned={scanned}, valid_targets={len(unique_targets)}"
+        f"mode={target_discovery_mode}, scanned={scanned}, valid_targets={len(unique_targets)}, cache=miss"
     )
     return unique_targets
 
@@ -1383,16 +1774,7 @@ def _engine_summary_path(database: str, receptor: str, kind: str, target: str, e
         Absolute path to ``engine_status/{engine}.json`` for the target.
     '''
 
-    return os.path.join(
-        ocdb_path,
-        database,
-        receptor,
-        "compounds",
-        kind,
-        target,
-        "engine_status",
-        f"{engine}.json",
-    )
+    return str(_target_dir_path(database, receptor, kind, target) / "engine_status" / f"{engine}.json")
 
 
 def _engine_summary_inputs(wildcards) -> List[str]:
@@ -1419,6 +1801,34 @@ def _engine_summary_inputs(wildcards) -> List[str]:
         )
         for engine in pipeline_engines
     ]
+
+
+def _preset_receptor_inputs(preset_name: str) -> List[str]:
+    paths: List[str] = []
+    for database in preset_database_aliases.get(preset_name, []):
+        for receptor in database_to_receptors.get(database, []):
+            paths.append(str(_receptor_path(database, receptor)))
+    return sorted(set(paths))
+
+
+def _wc_receptor_path(wildcards) -> str:
+    return str(_receptor_path(wildcards.database, wildcards.receptor))
+
+
+def _wc_receptor_cache_manifest_path(wildcards) -> str:
+    return str(_receptor_cache_manifest_path(wildcards.database, wildcards.receptor))
+
+
+def _wc_ligand_path(wildcards) -> str:
+    return str(_ligand_path(wildcards.database, wildcards.receptor, wildcards.kind, wildcards.target))
+
+
+def _wc_box_path(wildcards) -> str:
+    return str(_box_path(wildcards.database, wildcards.receptor, wildcards.kind, wildcards.target))
+
+
+def _wc_ligand_cache_manifest_path(wildcards) -> str:
+    return _ligand_cache_manifest_path(wildcards.database, wildcards.receptor, wildcards.kind, wildcards.target)
 
 
 def _ensure_prepared_file_with_lock(path: Union[str, Path], prepare_fn) -> bool:
@@ -1464,6 +1874,7 @@ def _run_single_engine_for_box(
     job_name: str,
     receptor_prepare_dir: Path,
     ligand_prepare_dir: Path,
+    engine_cpu_threads: int = 1,
 ) -> Dict[str, Any]:
     '''Run one docking engine for one box using OCDocker API objects.
 
@@ -1594,6 +2005,7 @@ def _run_single_engine_for_box(
         result["conf"] = str(conf)
         result["prep_rec"] = str(prep_receptor)
         result["prep_lig"] = str(prep_ligand)
+        _apply_engine_cpu_hint(engine, runner, engine_cpu_threads)
 
         if not _ensure_prepared_file_with_lock(prep_receptor, lambda: runner.run_prepare_receptor(overwrite=overwrite)):
             result["error"] = f"receptor preparation failed for {engine}"
@@ -1631,6 +2043,7 @@ def _run_single_engine_via_api(
     box_path: str,
     outdir_path: str,
     job_name: str,
+    max_workers: int = 1,
 ) -> Dict[str, Any]:
     '''Run one engine across one or many boxes and return summary payload.
 
@@ -1688,20 +2101,75 @@ def _run_single_engine_via_api(
         "pipeline_version": pipeline_version,
         "boxes": {},
     }
+    requested_workers = max(1, int(max_workers))
+    box_workers = min(len(boxes), requested_workers)
+    engine_cpu_threads = max(1, requested_workers // box_workers)
 
-    for box in boxes:
+    def _run_box(box: Path, receptor: Any, ligand: Any) -> Tuple[str, Dict[str, Any]]:
         box_id = box.stem
         box_outdir = base_outdir / box_id if use_multi_boxes else base_outdir
-        summary["boxes"][box_id] = _run_single_engine_for_box(
+        box_result = _run_single_engine_for_box(
             engine=engine,
-            receptor=receptor_obj,
-            ligand=ligand_obj,
+            receptor=receptor,
+            ligand=ligand,
             box_path=box,
             outdir=box_outdir,
             job_name=job_name,
             receptor_prepare_dir=receptor_prepare_dir,
             ligand_prepare_dir=ligand_prepare_dir,
+            engine_cpu_threads=engine_cpu_threads,
         )
+        return box_id, box_result
+
+    if box_workers <= 1:
+        for box in boxes:
+            box_id, box_result = _run_box(box, receptor_obj, ligand_obj)
+            summary["boxes"][box_id] = box_result
+    else:
+        results_by_box: Dict[str, Dict[str, Any]] = {}
+
+        def _run_box_isolated(box: Path) -> Tuple[str, Dict[str, Any]]:
+            isolated_receptor = ocr.Receptor(str(receptor_path), name=f"{job_name}_receptor")
+            isolated_ligand = ocl.Ligand(str(ligand_path), name=ligand_name)
+            return _run_box(box, isolated_receptor, isolated_ligand)
+
+        with ThreadPoolExecutor(max_workers=box_workers) as executor:
+            future_to_box = {executor.submit(_run_box_isolated, box): box for box in boxes}
+            for future in as_completed(future_to_box):
+                box = future_to_box[future]
+                box_id = box.stem
+                try:
+                    result_box_id, box_result = future.result()
+                    results_by_box[result_box_id] = box_result
+                except Exception as exc:
+                    results_by_box[box_id] = {
+                        "success": False,
+                        "engine": engine,
+                        "box": box_id,
+                        "dir": str(base_outdir / box_id if use_multi_boxes else base_outdir / f"{engine}Files"),
+                        "conf": "",
+                        "prep_rec": "",
+                        "prep_lig": "",
+                        "poses": [],
+                        "error": f"{type(exc).__name__}: {exc}",
+                    }
+
+        for box in boxes:
+            box_id = box.stem
+            summary["boxes"][box_id] = results_by_box.get(
+                box_id,
+                {
+                    "success": False,
+                    "engine": engine,
+                    "box": box_id,
+                    "dir": str(base_outdir / box_id if use_multi_boxes else base_outdir / f"{engine}Files"),
+                    "conf": "",
+                    "prep_rec": "",
+                    "prep_lig": "",
+                    "poses": [],
+                    "error": "internal error: missing parallel result",
+                },
+            )
 
     return summary
 
@@ -2107,6 +2575,7 @@ def _run_pipeline_postprocess_from_summaries(
     outdir_path: str,
     job_name: str,
     engine_summary_paths: List[str],
+    max_workers: int = 1,
 ) -> int:
     '''Run the post-processing stage from per-engine summaries.
 
@@ -2162,8 +2631,10 @@ def _run_pipeline_postprocess_from_summaries(
         loaded_summaries[engine] = data
 
     use_multi_boxes = pipeline_all_boxes and len(boxes) > 1
-    overall_rc = 0
-    for box in boxes:
+    requested_workers = max(1, int(max_workers))
+    box_workers = min(len(boxes), requested_workers)
+
+    def _process_box(box: Path, receptor: Any, ligand: Any) -> Tuple[str, int]:
         box_id = box.stem
         box_outdir = base_outdir / box_id if use_multi_boxes else base_outdir
         box_engine_results: Dict[str, Dict[str, Any]] = {}
@@ -2174,16 +2645,46 @@ def _run_pipeline_postprocess_from_summaries(
                 box_engine_results[engine] = box_map[box_id]
 
         rc = _postprocess_pipeline_box(
-            receptor=receptor_obj,
-            ligand=ligand_obj,
+            receptor=receptor,
+            ligand=ligand,
             box_path=box,
             outdir=box_outdir,
             job_name=job_name,
             box_label=box_id if use_multi_boxes else None,
             engine_box_results=box_engine_results,
         )
-        if rc != 0:
-            overall_rc = rc
+        return box_id, rc
+
+    overall_rc = 0
+    if box_workers <= 1:
+        for box in boxes:
+            _, rc = _process_box(box, receptor_obj, ligand_obj)
+            if rc != 0:
+                overall_rc = rc
+    else:
+        results_by_box: Dict[str, int] = {}
+
+        def _process_box_isolated(box: Path) -> Tuple[str, int]:
+            isolated_receptor = ocr.Receptor(str(receptor_path), name=f"{job_name}_receptor")
+            isolated_ligand = ocl.Ligand(str(ligand_path), name=ligand_name)
+            return _process_box(box, isolated_receptor, isolated_ligand)
+
+        with ThreadPoolExecutor(max_workers=box_workers) as executor:
+            future_to_box = {executor.submit(_process_box_isolated, box): box for box in boxes}
+            for future in as_completed(future_to_box):
+                box = future_to_box[future]
+                box_id = box.stem
+                try:
+                    result_box_id, rc = future.result()
+                    results_by_box[result_box_id] = rc
+                except Exception as exc:
+                    print(f"Warning: post-processing failed for {job_name}/{box_id}: {type(exc).__name__}: {exc}")
+                    results_by_box[box_id] = 2
+
+        for box in boxes:
+            rc = int(results_by_box.get(box.stem, 2))
+            if rc != 0:
+                overall_rc = rc
 
     return overall_rc
 
@@ -2199,6 +2700,7 @@ if enable_legacy_database_rules:
 
 # Keep engine wildcard constrained to user-selected/auto-detected engines.
 wildcard_constraints:
+    database=pipeline_databases_pattern,
     engine=pipeline_engines_pattern,
 
 
@@ -2224,14 +2726,14 @@ rule db_pdbbind:
     Set up the PDBbind database.
     """
     input:
-        expand(os.path.join(ocdb_path, "PDBbind", "{pdbbind_target}", "receptor.pdb"), pdbbind_target=pdbbind_targets),
+        lambda wildcards: _preset_receptor_inputs("PDBbind"),
 
 rule db_dudez:
     """
     Set up the DUDEz database.
     """
     input:
-        expand(os.path.join(ocdb_path, "DUDEz", "{dudez_target}", "receptor.pdb"), dudez_target=dudez_targets),
+        lambda wildcards: _preset_receptor_inputs("DUDEz"),
 
 
 rule prepare_receptor_cache:
@@ -2243,10 +2745,10 @@ rule prepare_receptor_cache:
     preparation requirements change.
     """
     input:
-        receptor=os.path.join(ocdb_path, "{database}", "{receptor}", "receptor.pdb"),
+        receptor=_wc_receptor_path,
     output:
         cache=os.path.join(
-            ocdb_path,
+            database_rule_root_str,
             "{database}",
             "{receptor}",
             f".prepared_receptor_cache.{pipeline_cache_key}.json",
@@ -2264,35 +2766,13 @@ rule prepare_ligand_cache:
     active engines/rescoring) and writes a cache manifest for DAG tracking.
     """
     input:
-        receptor=os.path.join(ocdb_path, "{database}", "{receptor}", "receptor.pdb"),
-        receptor_cache=os.path.join(
-            ocdb_path,
-            "{database}",
-            "{receptor}",
-            f".prepared_receptor_cache.{pipeline_cache_key}.json",
-        ),
-        ligand=os.path.join(
-            ocdb_path,
-            "{database}",
-            "{receptor}",
-            "compounds",
-            "{kind}",
-            "{target}",
-            "ligand.smi",
-        ),
-        box=os.path.join(
-            ocdb_path,
-            "{database}",
-            "{receptor}",
-            "compounds",
-            "{kind}",
-            "{target}",
-            "boxes",
-            "box0.pdb",
-        ),
+        receptor=_wc_receptor_path,
+        receptor_cache=_wc_receptor_cache_manifest_path,
+        ligand=_wc_ligand_path,
+        box=_wc_box_path,
     output:
         cache=os.path.join(
-            ocdb_path,
+            database_rule_root_str,
             "{database}",
             "{receptor}",
             "compounds",
@@ -2329,44 +2809,14 @@ rule run_engine:
     ``engine_status/{engine}.json``.
     """
     input:
-        receptor=os.path.join(ocdb_path, "{database}", "{receptor}", "receptor.pdb"),
-        receptor_cache=os.path.join(
-            ocdb_path,
-            "{database}",
-            "{receptor}",
-            f".prepared_receptor_cache.{pipeline_cache_key}.json",
-        ),
-        ligand=os.path.join(
-            ocdb_path,
-            "{database}",
-            "{receptor}",
-            "compounds",
-            "{kind}",
-            "{target}",
-            "ligand.smi",
-        ),
-        box=os.path.join(
-            ocdb_path,
-            "{database}",
-            "{receptor}",
-            "compounds",
-            "{kind}",
-            "{target}",
-            "boxes",
-            "box0.pdb",
-        ),
-        ligand_cache=os.path.join(
-            ocdb_path,
-            "{database}",
-            "{receptor}",
-            "compounds",
-            "{kind}",
-            "{target}",
-            f".prepared_ligand_cache.{pipeline_cache_key}.json",
-        ),
+        receptor=_wc_receptor_path,
+        receptor_cache=_wc_receptor_cache_manifest_path,
+        ligand=_wc_ligand_path,
+        box=_wc_box_path,
+        ligand_cache=_wc_ligand_cache_manifest_path,
     output:
         summary=os.path.join(
-            ocdb_path,
+            database_rule_root_str,
             "{database}",
             "{receptor}",
             "compounds",
@@ -2397,6 +2847,7 @@ rule run_engine:
             box_path=str(input.box),
             outdir_path=str(target_dir),
             job_name=job_name,
+            max_workers=int(threads),
         )
 
         out_path = Path(str(output.summary))
@@ -2412,36 +2863,14 @@ rule run_pipeline:
     rule only performs post-processing and DB persistence.
     """
     input:
-        receptor=os.path.join(ocdb_path, "{database}", "{receptor}", "receptor.pdb"),
-        receptor_cache=os.path.join(
-            ocdb_path,
-            "{database}",
-            "{receptor}",
-            f".prepared_receptor_cache.{pipeline_cache_key}.json",
-        ),
-        ligand=os.path.join(
-            ocdb_path,
-            "{database}",
-            "{receptor}",
-            "compounds",
-            "{kind}",
-            "{target}",
-            "ligand.smi",
-        ),
-        box=os.path.join(
-            ocdb_path,
-            "{database}",
-            "{receptor}",
-            "compounds",
-            "{kind}",
-            "{target}",
-            "boxes",
-            "box0.pdb",
-        ),
+        receptor=_wc_receptor_path,
+        receptor_cache=_wc_receptor_cache_manifest_path,
+        ligand=_wc_ligand_path,
+        box=_wc_box_path,
         engine_summaries=_engine_summary_inputs,
     output:
         payload=os.path.join(
-            ocdb_path,
+            database_rule_root_str,
             "{database}",
             "{receptor}",
             "compounds",
@@ -2450,7 +2879,7 @@ rule run_pipeline:
             "payload.pkl",
         ),
         run_report=os.path.join(
-            ocdb_path,
+            database_rule_root_str,
             "{database}",
             "{receptor}",
             "compounds",
@@ -2478,6 +2907,7 @@ rule run_pipeline:
             outdir_path=str(target_dir),
             job_name=job_name,
             engine_summary_paths=list(input.engine_summaries),
+            max_workers=int(threads),
         )
         if rc != 0:
             raise RuntimeError(

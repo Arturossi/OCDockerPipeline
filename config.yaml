@@ -7,17 +7,29 @@ overwrite: false
 db_backend: "postgresql"
 
 # Target selection
-run_databases:
+# Preferred database selector.
+# Supported entries:
+# - Presets: "PDBbind", "DUDEz"
+# - Alias under ocdb root: "other"  -> <ocdb>/other
+# - Explicit path with alias: "mydb=/abs/path/to/MyDB"
+# - Explicit path only: "/abs/path/to/MyDB" (alias inferred from directory name)
+database_sources:
   - "PDBbind"
   - "DUDEz"
+# Legacy fallback (used only when database_sources is omitted):
+# run_databases:
+#   - "PDBbind"
+#   - "DUDEz"
 compound_kinds:
   - "ligands"
   - "decoys"
   - "compounds"
 # Target discovery:
 # - "index": use pdb_database_index/dudez_database_index only
-# - "filesystem": scan ocdb/PDBbind and ocdb/DUDEz folders only
+# - "filesystem": scan each selected database root from database_sources
 # - "hybrid": merge index + filesystem (recommended)
+# Note: index mode is only valid for preset aliases (PDBbind/DUDEz);
+# custom path/alias sources must use filesystem or hybrid.
 target_discovery_mode: "hybrid"
 
 # Keep old include-based database rules disabled by default.
