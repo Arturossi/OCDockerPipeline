@@ -53,7 +53,7 @@ compound_kinds:
 target_discovery_mode: "filesystem"
 enable_legacy_database_rules: false
 
-pipeline_engines: ["vina", "smina"]
+pipeline_engines: ["vina", "gnina"]
 pipeline_rescoring_engines: ["vina", "smina", "oddt"]
 pipeline_store_db: false
 
@@ -132,8 +132,8 @@ if ! printf '%s\n' "${OUTPUT}" | grep -q "engine_status/vina.json"; then
     exit 1
 fi
 
-if ! printf '%s\n' "${OUTPUT}" | grep -q "engine_status/smina.json"; then
-    echo "Expected smina engine summary dependency not found in dry-run output."
+if ! printf '%s\n' "${OUTPUT}" | grep -q "engine_status/gnina.json"; then
+    echo "Expected gnina engine summary dependency not found in dry-run output."
     exit 1
 fi
 

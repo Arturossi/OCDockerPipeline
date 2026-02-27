@@ -36,12 +36,14 @@ target_discovery_mode: "hybrid"
 enable_legacy_database_rules: false
 
 # Pipeline settings
-# Engines are auto-detected from OCDocker.cfg executables if this key is omitted.
+# Docking engines (pose generation) are auto-detected from OCDocker.cfg executables if this key is omitted.
 # Each engine is executed as an independent Snakemake job (`run_engine`),
 # enabling parallel execution and shared preparation reuse.
-# pipeline_engines: ["vina", "smina", "gnina", "plants"]
+# Allowed values for docking are only: vina, gnina, plants.
+# pipeline_engines: ["vina", "gnina", "plants"]
 
-# Rescoring defaults to docking engines + oddt if this key is omitted.
+# Rescoring always includes all supported engines (vina,smina,gnina,plants,oddt)
+# and runs all configured scoring functions for each engine.
 # pipeline_rescoring_engines: ["vina", "smina", "gnina", "plants", "oddt"]
 pipeline_store_db: true
 # Include full installed Python package list in run_report.json.
@@ -57,7 +59,6 @@ pipeline_engine_threads_default: 1
 pipeline_engine_threads:
   gnina: 2
   vina: 1
-  smina: 1
   plants: 1
 
 pipeline_engine_mem_mb_default: 2000
@@ -65,7 +66,6 @@ pipeline_engine_mem_mb:
   gnina: 7000
   plants: 3000
   vina: 2000
-  smina: 2000
 
 # Post-processing scheduling (`run_pipeline`)
 pipeline_postprocess_threads: 2

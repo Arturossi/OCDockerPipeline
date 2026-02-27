@@ -2,3 +2,6 @@
 tmp/*
 nohup.out
 *_bad.mol2
+logs/*
+__pycache__/*
+*.pyc

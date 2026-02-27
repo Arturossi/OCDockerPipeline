@@ -60,10 +60,10 @@ while [[ "$#" -gt 0 ]]; do
 done
 
 case "${ENGINE}" in
-    vina|smina|gnina|plants)
+    vina|gnina|plants)
         ;;
     *)
-        echo "Unsupported engine '${ENGINE}'. Use one of: vina, smina, gnina, plants." >&2
+        echo "Unsupported engine '${ENGINE}'. Use one of: vina, gnina, plants." >&2
         exit 1
         ;;
 esac

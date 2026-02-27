@@ -39,7 +39,7 @@ from datetime import datetime, timezone
 from functools import lru_cache
 from glob import glob
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 try:
     import fcntl as _fcntl
@@ -107,6 +107,7 @@ cpu_cores = config["cpu_cores"]
 _db_tables_initialized = False
 _db_tables_init_lock = threading.Lock()
 _db_write_lock = threading.Lock()
+_PIPELINE_DB_SCHEMA_VERSION = "2026-02-27.pipeline-runs-v1"
 
 
 def _as_bool(value: Any, default: bool = False) -> bool:
@@ -143,6 +144,30 @@ def _parse_list(value, default):
         return [str(item).strip() for item in value if str(item).strip()]
 
     return [str(value).strip()] if str(value).strip() else []
+
+
+def _load_ignored_targets(index_path: str) -> Set[str]:
+    """Load ignored receptor IDs from a line-based text file."""
+
+    text_path = str(index_path or "").strip()
+    if not text_path:
+        return set()
+
+    path = Path(text_path)
+    if not path.is_file():
+        return set()
+
+    ignored: Set[str] = set()
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            for raw_line in handle:
+                line = raw_line.strip()
+                if line and not line.startswith("#"):
+                    ignored.add(line)
+    except OSError:
+        return set()
+
+    return ignored
 
 
 def _normalize_database_name(name):
@@ -705,7 +730,7 @@ def _ensure_db_runtime() -> None:
     schema_dir.mkdir(parents=True, exist_ok=True)
     schema_lock_path = schema_dir / "pipeline_db_schema.lock"
     schema_ready_path = schema_dir / "pipeline_db_schema.ready"
-    db_signature = _sha256_text(str(getattr(ocinit_runtime, "db_url", "")))
+    db_signature = _sha256_text(f"{getattr(ocinit_runtime, 'db_url', '')}|{_PIPELINE_DB_SCHEMA_VERSION}")
 
     with _db_tables_init_lock:
         if _db_tables_initialized:
@@ -733,11 +758,15 @@ def _store_pipeline_results_in_db(
     ligand: Any,
     rescoring: Dict[str, Dict[str, float]],
     box_label: Optional[str] = None,
+    representative_pose: Optional[str] = None,
+    representative_engine: Optional[str] = None,
+    summary: Optional[Dict[str, Any]] = None,
 ) -> Tuple[bool, str, List[str]]:
     _ensure_db_runtime()
 
     from OCDocker.DB.Models.Complexes import Complexes
     from OCDocker.DB.Models.Ligands import Ligands
+    from OCDocker.DB.Models.PipelineRuns import PipelineRuns
     from OCDocker.DB.Models.Receptors import Receptors
 
     receptor_name = str(getattr(receptor, "name", "") or f"{job_name}_receptor")
@@ -772,7 +801,21 @@ def _store_pipeline_results_in_db(
         complex_payload.update(score_payload)
 
         complex_ok = Complexes.insert_or_update(complex_payload)
-        return bool(complex_ok), complex_name, ignored_keys
+        complex_row = Complexes.find_first(complex_name)
+        complex_id = getattr(complex_row, "id", None)
+
+        pipeline_run_payload: Dict[str, Union[str, int, None]] = {
+            "name": complex_name,
+            "representative_pose": str(representative_pose) if representative_pose else None,
+            "representative_engine": str(representative_engine) if representative_engine else None,
+            "rescoring_json": json.dumps(_to_jsonable(rescoring), sort_keys=True),
+            "summary_json": json.dumps(_to_jsonable(summary or {}), sort_keys=True),
+        }
+        if isinstance(complex_id, int):
+            pipeline_run_payload["complex_id"] = complex_id
+
+        pipeline_run_ok = PipelineRuns.insert_or_update(pipeline_run_payload)
+        return bool(complex_ok and pipeline_run_ok), complex_name, ignored_keys
 
 
 def _canonicalize_rescore_key(engine: str, raw_key: str) -> str:
@@ -809,7 +852,10 @@ def _prepare_cached_receptors_for_receptor(receptor_path):
 
     if pipeline_requires_pdbqt:
         prepared_pdbqt = receptor_dir / "prepared_receptor.pdbqt"
-        if overwrite and prepared_pdbqt.exists():
+        # Drop stale zero-byte artifacts even when overwrite=False.
+        if prepared_pdbqt.is_file() and prepared_pdbqt.stat().st_size == 0:
+            prepared_pdbqt.unlink()
+        elif overwrite and prepared_pdbqt.exists():
             prepared_pdbqt.unlink()
 
         if not prepared_pdbqt.exists() or prepared_pdbqt.stat().st_size == 0:
@@ -835,7 +881,10 @@ def _prepare_cached_receptors_for_receptor(receptor_path):
 
     if pipeline_requires_mol2:
         prepared_mol2 = receptor_dir / "prepared_receptor.mol2"
-        if overwrite and prepared_mol2.exists():
+        # Drop stale zero-byte artifacts even when overwrite=False.
+        if prepared_mol2.is_file() and prepared_mol2.stat().st_size == 0:
+            prepared_mol2.unlink()
+        elif overwrite and prepared_mol2.exists():
             prepared_mol2.unlink()
 
         if not prepared_mol2.exists() or prepared_mol2.stat().st_size == 0:
@@ -1178,20 +1227,20 @@ engine_executables = {
     "plants": getattr(getattr(oc_config, "plants", None), "executable", None),
 }
 auto_engines = [
-    engine for engine in ("vina", "smina", "gnina", "plants") if _binary_available(engine_executables.get(engine))
+    engine for engine in ("vina", "gnina", "plants") if _binary_available(engine_executables.get(engine))
 ]
-default_engines = auto_engines or ["vina", "smina", "plants"]
+default_engines = auto_engines or ["vina", "gnina", "plants"]
 
 pipeline_engines = [
     engine.lower() for engine in _parse_list(config.get("pipeline_engines"), default_engines)
 ]
-valid_docking_engines = {"vina", "smina", "gnina", "plants"}
+valid_docking_engines = {"vina", "gnina", "plants"}
 pipeline_engines = [engine for engine in pipeline_engines if engine in valid_docking_engines]
 pipeline_engines = list(dict.fromkeys(pipeline_engines))
 if not pipeline_engines:
     raise RuntimeError(
         "No valid docking engines configured for pipeline execution. "
-        "Set pipeline_engines in config.yaml with at least one of: vina,smina,gnina,plants"
+        "Set pipeline_engines in config.yaml with at least one of: vina,gnina,plants"
     )
 
 unavailable_requested_engines = [
@@ -1205,15 +1254,15 @@ if unavailable_requested_engines:
         "Configured docking engines are unavailable in OCDocker.cfg/PATH: "
         f"{missing_bins}. Fix executable paths or remove unavailable engines from pipeline_engines."
     )
-pipeline_rescoring_default = list(dict.fromkeys(pipeline_engines + ["oddt"]))
-pipeline_rescoring_engines = [
+pipeline_rescoring_default = ["vina", "smina", "gnina", "plants", "oddt"]
+requested_rescoring_engines = [
     engine.lower() for engine in _parse_list(config.get("pipeline_rescoring_engines"), pipeline_rescoring_default)
 ]
 valid_rescoring_engines = {"vina", "smina", "gnina", "plants", "oddt"}
-pipeline_rescoring_engines = [engine for engine in pipeline_rescoring_engines if engine in valid_rescoring_engines]
-pipeline_rescoring_engines = list(dict.fromkeys(pipeline_rescoring_engines))
-if not pipeline_rescoring_engines:
-    pipeline_rescoring_engines = pipeline_rescoring_default
+requested_rescoring_engines = [engine for engine in requested_rescoring_engines if engine in valid_rescoring_engines]
+pipeline_rescoring_engines = list(
+    dict.fromkeys(pipeline_rescoring_default + requested_rescoring_engines)
+)
 pipeline_engines_set = set(pipeline_engines)
 pipeline_rescoring_engines_set = set(pipeline_rescoring_engines)
 pipeline_engines_pattern = "|".join(pipeline_engines)
@@ -1513,6 +1562,17 @@ def _run_report_path(database: str, receptor: str, kind: str, target: str) -> Pa
     return _target_dir_path(database, receptor, kind, target) / "run_report.json"
 
 
+ignored_pdb_index = str(config.get("ignored_pdb_database_index", "") or "").strip()
+ignored_dudez_index = str(config.get("ignored_dudez_database_index", "") or "").strip()
+ignored_pdb_targets = _load_ignored_targets(ignored_pdb_index)
+ignored_dudez_targets = _load_ignored_targets(ignored_dudez_index)
+ignored_receptors_by_database: Dict[str, Set[str]] = {database: set() for database in selected_databases}
+for _database in preset_database_aliases["PDBbind"]:
+    ignored_receptors_by_database[_database] = set(ignored_pdb_targets)
+for _database in preset_database_aliases["DUDEz"]:
+    ignored_receptors_by_database[_database] = set(ignored_dudez_targets)
+
+
 custom_database_aliases = [db for db, spec in database_specs.items() if not spec.get("preset")]
 if target_discovery_mode == "index" and custom_database_aliases:
     raise RuntimeError(
@@ -1526,9 +1586,7 @@ if target_discovery_mode in {"index", "hybrid"}:
     import OCDP.preload as OCDPpre
 
     pdb_database_index = str(config.get("pdb_database_index", "") or "").strip()
-    ignored_pdb_index = str(config.get("ignored_pdb_database_index", "") or "").strip()
     dudez_database_index = str(config.get("dudez_database_index", "") or "").strip()
-    ignored_dudez_index = str(config.get("ignored_dudez_database_index", "") or "").strip()
 
     if not pdb_database_index and target_discovery_mode == "index" and preset_database_aliases["PDBbind"]:
         raise RuntimeError("pdb_database_index is required when target_discovery_mode=index for PDBbind.")
@@ -1579,6 +1637,10 @@ def _collect_database_receptors(database: str) -> List[str]:
         receptors.extend(index_targets.get(database, []))
     if target_discovery_mode in {"filesystem", "hybrid"}:
         receptors.extend(_discover_receptors_from_filesystem(database))
+
+    ignored = ignored_receptors_by_database.get(database, set())
+    if ignored:
+        receptors = [receptor for receptor in receptors if receptor not in ignored]
 
     result = sorted(set(receptors))
     if database in selected_databases and not result:
@@ -1858,6 +1920,14 @@ def _ensure_prepared_file_with_lock(path: Union[str, Path], prepare_fn) -> bool:
     with _file_lock(lock_file):
         if _is_valid_file(prep_path):
             return True
+        # Some preparers skip when file already exists and overwrite is disabled.
+        # Remove stale zero-byte artifacts so preparation can proceed.
+        if prep_path.is_file():
+            try:
+                if prep_path.stat().st_size == 0:
+                    prep_path.unlink()
+            except OSError:
+                pass
         rc = _normalize_exit_code(prepare_fn())
         if rc != 0:
             return False
@@ -2312,6 +2382,7 @@ def _postprocess_pipeline_box(
         clustering_info["representative_cluster_size"] = cluster_sizes.get(rep_cluster, 0)
 
     representative_original = mol2_map.get(representative_mol2, representative_mol2)
+    representative_engine = pose_engine_map.get(str(representative_original), "")
     representative_pdbqt: Optional[Path] = None
     representative_mol2_final: Optional[Path] = None
 
@@ -2541,6 +2612,7 @@ def _postprocess_pipeline_box(
         "engines": pipeline_engines,
         "rescoring_engines": sorted(rescoring.keys()),
         "representative_pose": str(representative_pose_path),
+        "representative_engine": representative_engine,
         "clustering": clustering_info,
         "rescoring": rescoring,
     }
@@ -2554,6 +2626,9 @@ def _postprocess_pipeline_box(
                 ligand=ligand,
                 rescoring=rescoring,
                 box_label=box_label,
+                representative_pose=str(representative_pose_path),
+                representative_engine=representative_engine,
+                summary=summary,
             )
             if stored and ignored_keys:
                 print(
@@ -2945,9 +3020,16 @@ rule run_pipeline:
             raise RuntimeError(f"Pipeline output missing summary.json at: {summary_path}")
 
         representative_pose = summary.get("representative_pose")
+        representative_engine = summary.get("representative_engine")
         if representative_pose is None and isinstance(summary.get("box_summaries"), dict):
             representative_pose = {
                 box_name: box_data.get("representative_pose")
+                for box_name, box_data in summary["box_summaries"].items()
+                if isinstance(box_data, dict)
+            }
+        if representative_engine is None and isinstance(summary.get("box_summaries"), dict):
+            representative_engine = {
+                box_name: box_data.get("representative_engine")
                 for box_name, box_data in summary["box_summaries"].items()
                 if isinstance(box_data, dict)
             }
@@ -2960,6 +3042,7 @@ rule run_pipeline:
             "kind": wildcards.kind,
             "target": wildcards.target,
             "representative_pose": representative_pose,
+            "representative_engine": representative_engine,
             "run_report": str(output.run_report),
             "summary": summary,
         }

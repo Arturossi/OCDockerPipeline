@@ -3,13 +3,15 @@
 Snakemake workflow for running OCDocker through the Python API (without per-target CLI subprocess calls).
 The pipeline is structured for multi-engine fan-out, shared preparation caching, and traceable post-processing.
 
+For an operator-focused command reference, see `MANUAL.md`.
+
 ## Overview
 
 For each `{database}/{receptor}/compounds/{kind}/{target}` entry, the workflow:
 
 1. Validates and caches receptor preparation (`prepare_receptor_cache`).
 2. Prepares and caches ligand artifacts shared across engines (`prepare_ligand_cache`).
-3. Runs one independent `run_engine` job per selected docking engine.
+3. Runs one independent `run_engine` job per selected docking engine (`vina`, `gnina`, `plants`).
 4. Aggregates in `run_pipeline`, performs clustering/rescoring, and optionally writes DB rows.
 5. Writes `summary.json`, `payload.pkl`, and `run_report.json`.
 
@@ -47,8 +49,8 @@ Core keys:
 - `database_sources`: databases to process (preset names or custom paths).
 - `compound_kinds`: kinds to process (`ligands`, `decoys`, `compounds`).
 - `target_discovery_mode`: `index`, `filesystem`, or `hybrid`.
-- `pipeline_engines`: optional explicit docking engines.
-- `pipeline_rescoring_engines`: optional explicit rescoring engines.
+- `pipeline_engines`: optional explicit docking engines (`vina`, `gnina`, `plants` only).
+- `pipeline_rescoring_engines`: optional rescoring engine list (all supported rescoring engines are always included).
 - `pipeline_store_db`: enable/disable DB writes.
 - `pipeline_cluster_min`, `pipeline_cluster_max`, `pipeline_cluster_step`.
 - `pipeline_all_boxes`: when `true`, process all `box*.pdb` files for each target.
@@ -67,8 +69,9 @@ Behavior:
   - alias + path: `mydb=/abs/path/to/MyDB`
 - if `database_sources` is omitted, legacy `run_databases` is still supported.
 - `target_discovery_mode=index` is valid only for preset aliases (`PDBbind`, `DUDEz`).
-- If `pipeline_engines` is omitted, engines are auto-detected from `OCDocker.cfg` executables.
-- If `pipeline_rescoring_engines` is omitted, it defaults to `pipeline_engines + oddt`.
+- If `pipeline_engines` is omitted, engines are auto-detected from `OCDocker.cfg` executables among `vina,gnina,plants`.
+- Docking uses each engine's default scoring function only (pose generation only).
+- Rescoring always includes all supported rescoring engines: `vina,smina,gnina,plants,oddt`, each with its configured scoring-function set.
 
 Common selections:
 
@@ -141,6 +144,27 @@ snakemake -s snakefile --cores 16 --resources mem_mb=28000 --use-conda --conda-f
 
 Why `--resources mem_mb=28000`: rule-level `mem_mb` limits are enforced only when a global resource budget is provided.
 
+Monitoring with snkmt:
+
+```bash
+snakemake -s snakefile \
+  --logger snkmt \
+  --logger-snkmt-db .snakemake/snkmt.db \
+  --cores 16 --resources mem_mb=28000 --use-conda --conda-frontend mamba --keep-going
+```
+
+In another terminal, open the Snakemate monitor:
+
+```bash
+snkmt console --db-path .snakemake/snkmt.db
+```
+
+If needed, install the logger plugin first:
+
+```bash
+pip install snakemake-logger-plugin-snkmt
+```
+
 Database-only target preparation:
 
 ```bash
@@ -186,6 +210,11 @@ Per target (`<database_root>/<receptor>/compounds/<kind>/<target>/`):
 - `summary.json` (or `box*/summary.json` with `pipeline_all_boxes: true`): post-processing summary.
 - `payload.pkl`: main target artifact used by Snakemake rules.
 - `run_report.json`: reproducibility report for the target.
+
+When `pipeline_store_db: true`, DB persistence includes:
+
+- `complexes`: receptor/ligand links plus mapped numeric rescoring columns.
+- `pipelineruns`: selected representative pose, representative engine, full rescoring JSON payload, and post-processing summary JSON.
 
 ## Reproducibility Report
 
