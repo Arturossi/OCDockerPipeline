@@ -116,7 +116,9 @@ if ! printf '%s\n' "${OUTPUT}" | grep -q "^rule prepare_ligand_cache:"; then
     exit 1
 fi
 
-RUN_ENGINE_COUNT="$(printf '%s\n' "${OUTPUT}" | grep -c "^rule run_engine:")"
+RUN_ENGINE_COUNT="$(
+    printf '%s\n' "${OUTPUT}" | awk '/^rule run_engine_[^:]+:/{count++} END{print count+0}'
+)"
 if [[ "${RUN_ENGINE_COUNT}" -ne 2 ]]; then
     echo "Expected exactly 2 run_engine jobs, got ${RUN_ENGINE_COUNT}."
     exit 1
