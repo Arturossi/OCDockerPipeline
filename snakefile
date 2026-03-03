@@ -1,13 +1,13 @@
 """
-Module name: main
+OCDockerPipeline Snakemake workflow.
 
-this is the main file from snakemake pipeline. It is responsible for the
-execution of the pipeline.
+This Snakefile orchestrates target discovery, preparation caching, per-engine
+docking, post-processing (clustering and rescoring), optional ODDT rescoring,
+payload/report generation, and per-database CSV export.
 
 Author: Artur Duque Rossi
-
-Created: 06-11-2023
-Last modified: 17-02-2026
+Created: 2023-11-06
+Last modified: 2026-02-28
 """
 
 # Initial directives
@@ -26,6 +26,7 @@ import numbers
 import os
 import pickle
 import platform
+import multiprocessing as mp
 import re
 import shutil
 import socket
@@ -171,6 +172,8 @@ def _load_ignored_targets(index_path: str) -> Set[str]:
 
 
 def _normalize_database_name(name):
+    """Normalize user-provided database names to canonical aliases."""
+
     lower = str(name).strip().lower()
     if lower == "pdbbind":
         return "PDBbind"
@@ -180,11 +183,15 @@ def _normalize_database_name(name):
 
 
 def _is_valid_file(path: Union[str, Path]) -> bool:
+    """Return ``True`` when ``path`` exists, is a file, and is non-empty."""
+
     p = Path(path)
     return p.is_file() and p.stat().st_size > 0
 
 
 def _binary_available(executable):
+    """Check whether an executable path/name is available and runnable."""
+
     if not executable:
         return False
 
@@ -222,18 +229,26 @@ def _normalize_exit_code(result):
 
 
 def _utc_now_iso() -> str:
+    """Return the current UTC time formatted as an ISO-8601 string."""
+
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def _utc_iso_from_timestamp(value: float) -> str:
+    """Convert a UNIX timestamp into a UTC ISO-8601 string."""
+
     return datetime.fromtimestamp(value, tz=timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def _sha256_text(value: str) -> str:
+    """Compute SHA-256 hash for a UTF-8 text payload."""
+
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
 def _sha256_file(path: Union[str, Path]) -> Optional[str]:
+    """Compute SHA-256 hash for a file, or ``None`` when it does not exist."""
+
     file_path = Path(path)
     if not file_path.is_file():
         return None
@@ -246,6 +261,8 @@ def _sha256_file(path: Union[str, Path]) -> Optional[str]:
 
 
 def _to_jsonable(value: Any) -> Any:
+    """Recursively convert values into JSON-serializable primitives."""
+
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
 
@@ -259,12 +276,16 @@ def _to_jsonable(value: Any) -> Any:
 
 
 def _json_sha256(payload: Any) -> str:
+    """Compute a stable SHA-256 hash for a JSON-normalized payload."""
+
     normalized = _to_jsonable(payload)
     text = json.dumps(normalized, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
     return _sha256_text(text)
 
 
 def _file_fingerprint(path: Union[str, Path], include_sha256: bool = True) -> Dict[str, Any]:
+    """Collect reproducibility metadata (existence, size, mtime, optional SHA-256)."""
+
     file_path = Path(path)
     payload: Dict[str, Any] = {
         "path": str(file_path),
@@ -283,6 +304,8 @@ def _file_fingerprint(path: Union[str, Path], include_sha256: bool = True) -> Di
 
 
 def _run_git(repo_root: Union[str, Path], args: List[str]) -> Optional[str]:
+    """Run a short git command in ``repo_root`` and return stripped stdout."""
+
     root = Path(repo_root)
     try:
         completed = subprocess.run(
@@ -303,6 +326,8 @@ def _run_git(repo_root: Union[str, Path], args: List[str]) -> Optional[str]:
 
 
 def _collect_git_manifest(repo_root: Union[str, Path]) -> Dict[str, Optional[Union[str, bool]]]:
+    """Return commit/branch/dirty metadata for a git repository."""
+
     commit = _run_git(repo_root, ["rev-parse", "HEAD"])
     branch = _run_git(repo_root, ["rev-parse", "--abbrev-ref", "HEAD"])
     status = _run_git(repo_root, ["status", "--porcelain"])
@@ -358,6 +383,23 @@ def _apply_engine_cpu_hint(engine: str, runner: Any, threads_hint: int) -> None:
         _set_command_option(getattr(runner, "gnina_cmd", None), "--cpu", cpu_threads)
 
 
+def _apply_thread_limit_env(threads_hint: int) -> int:
+    """Export thread/cpu env hints so engine subprocesses follow Snakemake limits."""
+
+    threads_count = max(1, int(threads_hint))
+    for env_name in (
+        "OCDOCKER_GNINA_CPU",
+        "SNK_THREADS",
+        "SNAKEMAKE_THREADS",
+        "OMP_NUM_THREADS",
+        "OPENBLAS_NUM_THREADS",
+        "MKL_NUM_THREADS",
+        "NUMEXPR_NUM_THREADS",
+    ):
+        os.environ[env_name] = str(threads_count)
+    return threads_count
+
+
 @lru_cache(maxsize=2)
 def _cached_reproducibility_manifest(include_python_packages: bool) -> Tuple[Dict[str, Any], Optional[str]]:
     """Collect reproducibility manifest once per interpreter process."""
@@ -388,6 +430,8 @@ def _generate_run_report(
     payload_path: Union[str, Path],
     report_path: Union[str, Path],
 ) -> Dict[str, Any]:
+    """Build the structured run-report payload for one pipeline target."""
+
     ocdocker_manifest, ocdocker_manifest_error = _cached_reproducibility_manifest(
         pipeline_report_include_python_packages
     )
@@ -435,6 +479,13 @@ def _generate_run_report(
                 "all_boxes": pipeline_all_boxes,
                 "timeout": pipeline_timeout,
                 "store_db": pipeline_store_db,
+                "store_db_mid_execution": pipeline_store_db_mid_execution,
+                "export_database_csv": pipeline_export_database_csv,
+                "engine_gpu": {
+                    "default": pipeline_engine_gpu_default,
+                    "map": dict(pipeline_engine_gpu_map),
+                    "total_gpus": pipeline_total_gpus,
+                },
                 "report_include_python_packages": pipeline_report_include_python_packages,
                 "database_source": _to_jsonable(database_specs.get(database, {})),
             },
@@ -488,6 +539,8 @@ def _generate_run_report(
 
 @contextmanager
 def _file_lock(lock_path: Union[str, Path]):
+    """Provide an inter-process file lock context manager for shared artifacts."""
+
     lock_path = Path(lock_path)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     handle = lock_path.open("a+", encoding="utf-8")
@@ -505,6 +558,8 @@ def _file_lock(lock_path: Union[str, Path]):
 
 
 def _box_sort_key(path: Path) -> Tuple[int, object]:
+    """Sort ``box*.pdb`` names numerically before fallback lexical ordering."""
+
     stem = path.stem.lower()
     if stem.startswith("box"):
         suffix = stem[3:]
@@ -514,6 +569,8 @@ def _box_sort_key(path: Path) -> Tuple[int, object]:
 
 
 def _list_boxes(ligand_dir: Path, box_path: Path, all_boxes: bool) -> List[Path]:
+    """Resolve default or multi-box input list for a target and return sorted unique paths."""
+
     if not all_boxes:
         return [box_path]
 
@@ -567,6 +624,8 @@ def _ensure_mol2_poses(
 
 
 def _is_integer_descriptor_name(descriptor: str) -> bool:
+    """Identify descriptor names that should be stored as integer values."""
+
     name = descriptor.strip()
     return (
         name.startswith("fr_")
@@ -577,6 +636,8 @@ def _is_integer_descriptor_name(descriptor: str) -> bool:
 
 
 def _to_numeric(value: Any) -> Optional[float]:
+    """Safely convert supported numeric values to finite ``float``."""
+
     if isinstance(value, bool):
         return float(int(value))
     if not isinstance(value, numbers.Real):
@@ -589,6 +650,8 @@ def _to_numeric(value: Any) -> Optional[float]:
 
 
 def _collect_numeric_descriptors(obj: Any, descriptor_names: List[str]) -> Dict[str, Union[int, float]]:
+    """Extract selected numeric descriptors from an object attribute set."""
+
     payload: Dict[str, Union[int, float]] = {}
     for descriptor in descriptor_names:
         if not hasattr(obj, descriptor):
@@ -604,6 +667,8 @@ def _collect_numeric_descriptors(obj: Any, descriptor_names: List[str]) -> Dict[
 
 
 def _map_score_to_complex_column(raw_key: str) -> Optional[str]:
+    """Map raw rescoring keys to ``Complexes`` table score columns."""
+
     key = raw_key.strip().lower().replace("-", "_").replace(" ", "_")
     while "__" in key:
         key = key.replace("__", "_")
@@ -621,6 +686,18 @@ def _map_score_to_complex_column(raw_key: str) -> Optional[str]:
         "smina_dkoes_fast": "SMINA_FAST_DKOES",
         "smina_scoring_ad4": "SMINA_SCORING_AD4",
         "smina_ad4_scoring": "SMINA_SCORING_AD4",
+        # Keep Gnina mapping hardcoded like other engines, matching gnina_scoring_functions defaults.
+        "gnina_ad4_scoring": "GNINA_AD4_SCORING",
+        "gnina_scoring_ad4": "GNINA_AD4_SCORING",
+        "gnina_default": "GNINA_DEFAULT",
+        "gnina_dkoes_fast": "GNINA_DKOES_FAST",
+        "gnina_fast_dkoes": "GNINA_DKOES_FAST",
+        "gnina_dkoes_scoring": "GNINA_DKOES_SCORING",
+        "gnina_scoring_dkoes": "GNINA_DKOES_SCORING",
+        "gnina_dkoes_scoring_old": "GNINA_DKOES_SCORING_OLD",
+        "gnina_old_scoring_dkoes": "GNINA_DKOES_SCORING_OLD",
+        "gnina_vina": "GNINA_VINA",
+        "gnina_vinardo": "GNINA_VINARDO",
         "plants_chemplp": "PLANTS_CHEMPLP",
         "plants_plp": "PLANTS_PLP",
         "plants_plp95": "PLANTS_PLP95",
@@ -649,6 +726,8 @@ def _map_score_to_complex_column(raw_key: str) -> Optional[str]:
 
 
 def _flatten_rescoring_to_complex_payload(rescoring: Dict[str, Dict[str, float]]) -> Tuple[Dict[str, float], List[str]]:
+    """Flatten nested rescoring maps into DB-ready score payload."""
+
     payload: Dict[str, float] = {}
     ignored_keys: List[str] = []
 
@@ -669,8 +748,11 @@ def _flatten_rescoring_to_complex_payload(rescoring: Dict[str, Dict[str, float]]
 
 
 def _ensure_db_runtime() -> None:
+    """Initialize DB engine/session/schema lazily before pipeline writes."""
+
     import OCDocker.Initialise as ocinit_runtime
-    from OCDocker.DB.DB import create_tables
+    import OCDocker.DB.DB as ocdb_runtime
+    import OCDocker.DB.Models.Base as ocdb_models_base
     from OCDocker.DB.DBMinimal import create_database_if_not_exists, create_engine, create_session
     from sqlalchemy.engine import URL
 
@@ -723,6 +805,14 @@ def _ensure_db_runtime() -> None:
         ocinit_runtime.engine = engine
         ocinit_runtime.session = session_factory
 
+    # DB model modules import `Initialise.session` at import-time and cache it.
+    # Refresh cached references after runtime session initialization so model
+    # methods (insert_or_update/find_first/etc.) do not see a stale None value.
+    runtime_session = getattr(ocinit_runtime, "session", None)
+    if runtime_session is not None:
+        ocdb_runtime.session = runtime_session
+        ocdb_models_base.session = runtime_session
+
     if _db_tables_initialized:
         return
 
@@ -746,7 +836,7 @@ def _ensure_db_runtime() -> None:
                     _db_tables_initialized = True
                     return
 
-            create_tables()
+            ocdb_runtime.create_tables()
             schema_ready_path.write_text(f"{db_signature}\n{_utc_now_iso()}\n", encoding="utf-8")
 
         _db_tables_initialized = True
@@ -762,6 +852,8 @@ def _store_pipeline_results_in_db(
     representative_engine: Optional[str] = None,
     summary: Optional[Dict[str, Any]] = None,
 ) -> Tuple[bool, str, List[str]]:
+    """Upsert receptor/ligand/complex/pipeline-run records for one result."""
+
     _ensure_db_runtime()
 
     from OCDocker.DB.Models.Complexes import Complexes
@@ -818,7 +910,72 @@ def _store_pipeline_results_in_db(
         return bool(complex_ok and pipeline_run_ok), complex_name, ignored_keys
 
 
+def _pipeline_progress_row_name(job_name: str, engine: str) -> str:
+    """Build a deterministic DB row name for engine progress records."""
+
+    return f"{job_name}__progress__{engine}"
+
+
+def _store_engine_progress_in_db(
+    *,
+    job_name: str,
+    database: str,
+    receptor: str,
+    kind: str,
+    target: str,
+    engine: str,
+    phase: str,
+    summary_path: Optional[str] = None,
+    summary: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Persist mid-execution engine progress events into ``PipelineRuns``."""
+
+    if not (pipeline_store_db and pipeline_store_db_mid_execution):
+        return
+
+    try:
+        _ensure_db_runtime()
+        from OCDocker.DB.Models.PipelineRuns import PipelineRuns
+
+        event_payload: Dict[str, Any] = {
+            "schema_version": 1,
+            "record_type": "engine_progress",
+            "phase": str(phase),
+            "updated_at_utc": _utc_now_iso(),
+            "job": {
+                "name": str(job_name),
+                "database": str(database),
+                "receptor": str(receptor),
+                "kind": str(kind),
+                "target": str(target),
+            },
+            "engine": str(engine),
+            "engine_summary_path": str(summary_path) if summary_path else None,
+        }
+        if isinstance(summary, dict) and summary:
+            event_payload["engine_summary"] = _to_jsonable(summary)
+
+        payload: Dict[str, Union[str, int, None]] = {
+            "name": _pipeline_progress_row_name(job_name, engine),
+            "representative_engine": str(engine),
+            "summary_json": json.dumps(_to_jsonable(event_payload), sort_keys=True),
+        }
+        ok = PipelineRuns.insert_or_update(payload)
+        if not ok:
+            print(
+                "Warning: failed to upsert engine progress in DB "
+                f"for {job_name}/{engine} ({phase})."
+            )
+    except Exception as exc:
+        print(
+            "Warning: failed to store engine progress in DB "
+            f"for {job_name}/{engine} ({phase}): {type(exc).__name__}: {exc}"
+        )
+
+
 def _canonicalize_rescore_key(engine: str, raw_key: str) -> str:
+    """Normalize rescoring keys to a canonical ``engine_metric`` form."""
+
     key = str(raw_key).strip().lower().replace("-", "_").replace(" ", "_")
     while "__" in key:
         key = key.replace("__", "_")
@@ -896,6 +1053,8 @@ def _prepare_cached_receptors_for_receptor(receptor_path):
 
 
 def _cache_settings_signature() -> str:
+    """Hash cache-relevant pipeline settings into a short invalidation signature."""
+
     signature_payload = {
         "engines": sorted(pipeline_engines_set),
         "rescoring": sorted(pipeline_rescoring_engines_set),
@@ -908,6 +1067,8 @@ def _cache_settings_signature() -> str:
 
 
 def _build_receptor_cache_manifest(receptor_path: Union[str, Path]) -> Dict[str, Any]:
+    """Create the receptor-preparation cache manifest for validation."""
+
     receptor_path = Path(receptor_path).resolve()
     receptor_stat = receptor_path.stat()
     receptor_dir = receptor_path.parent
@@ -942,6 +1103,8 @@ def _build_receptor_cache_manifest(receptor_path: Union[str, Path]) -> Dict[str,
 
 
 def _cache_manifest_is_valid(cache_manifest_path: Union[str, Path], receptor_path: Union[str, Path]) -> bool:
+    """Validate receptor cache manifest against current receptor/artifact state."""
+
     cache_manifest_path = Path(cache_manifest_path)
     if not cache_manifest_path.is_file():
         return False
@@ -971,6 +1134,8 @@ def _cache_manifest_is_valid(cache_manifest_path: Union[str, Path], receptor_pat
 
 
 def _write_cache_manifest(cache_manifest_path: Union[str, Path], receptor_path: Union[str, Path]) -> None:
+    """Write receptor cache manifest JSON for a receptor entry."""
+
     cache_manifest_path = Path(cache_manifest_path)
     manifest = _build_receptor_cache_manifest(receptor_path)
     cache_manifest_path.parent.mkdir(parents=True, exist_ok=True)
@@ -978,6 +1143,8 @@ def _write_cache_manifest(cache_manifest_path: Union[str, Path], receptor_path: 
 
 
 def _ensure_receptor_cache_ready(receptor_path: Union[str, Path], cache_manifest_path: Union[str, Path]) -> None:
+    """Prepare receptor artifacts and refresh cache manifest when stale."""
+
     receptor_path = Path(receptor_path)
     cache_manifest_path = Path(cache_manifest_path)
     if _cache_manifest_is_valid(cache_manifest_path, receptor_path):
@@ -988,6 +1155,8 @@ def _ensure_receptor_cache_ready(receptor_path: Union[str, Path], cache_manifest
 
 
 def _cached_receptor_files_present(receptor_path: Union[str, Path]) -> bool:
+    """Check whether required prepared receptor files are already present."""
+
     receptor_dir = Path(receptor_path).resolve().parent
     if pipeline_requires_pdbqt and not _is_valid_file(receptor_dir / "prepared_receptor.pdbqt"):
         return False
@@ -1003,6 +1172,8 @@ def _ligand_cache_manifest_path(database: str, receptor: str, kind: str, target:
 
 
 def _build_ligand_cache_manifest(ligand_path: Union[str, Path], target_dir: Union[str, Path]) -> Dict[str, Any]:
+    """Create the ligand-preparation cache manifest for one target."""
+
     ligand_path = Path(ligand_path).resolve()
     ligand_stat = ligand_path.stat()
     target_dir = Path(target_dir).resolve()
@@ -1041,6 +1212,8 @@ def _ligand_cache_manifest_is_valid(
     ligand_path: Union[str, Path],
     target_dir: Union[str, Path],
 ) -> bool:
+    """Validate ligand cache manifest against current target artifact state."""
+
     cache_manifest_path = Path(cache_manifest_path)
     if not cache_manifest_path.is_file():
         return False
@@ -1074,6 +1247,8 @@ def _write_ligand_cache_manifest(
     ligand_path: Union[str, Path],
     target_dir: Union[str, Path],
 ) -> None:
+    """Write ligand cache manifest JSON for one target entry."""
+
     cache_manifest_path = Path(cache_manifest_path)
     manifest = _build_ligand_cache_manifest(ligand_path, target_dir)
     cache_manifest_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1210,6 +1385,8 @@ def _ensure_ligand_cache_ready(
     cache_manifest_path: Union[str, Path],
     job_name: str,
 ) -> None:
+    """Prepare ligand artifacts and refresh cache manifest when stale."""
+
     target_dir = Path(target_dir)
     cache_manifest_path = Path(cache_manifest_path)
     if _ligand_cache_manifest_is_valid(cache_manifest_path, ligand_path, target_dir):
@@ -1276,6 +1453,11 @@ pipeline_cluster_max = float(config.get("pipeline_cluster_max", 20.0))
 pipeline_cluster_step = float(config.get("pipeline_cluster_step", 0.1))
 pipeline_all_boxes = _as_bool(config.get("pipeline_all_boxes", False), default=False)
 pipeline_store_db = _as_bool(config.get("pipeline_store_db", True), default=True)
+pipeline_store_db_mid_execution = _as_bool(
+    config.get("pipeline_store_db_mid_execution", pipeline_store_db),
+    default=pipeline_store_db,
+)
+pipeline_export_database_csv = _as_bool(config.get("pipeline_export_database_csv", True), default=True)
 pipeline_discovery_cache = _as_bool(config.get("pipeline_discovery_cache", True), default=True)
 pipeline_report_include_python_packages = _as_bool(
     config.get("pipeline_report_include_python_packages", False),
@@ -1322,8 +1504,24 @@ pipeline_engine_threads_map = _parse_engine_int_map(config.get("pipeline_engine_
 pipeline_engine_mem_mb_default = max(1, int(config.get("pipeline_engine_mem_mb_default", 2000)))
 pipeline_engine_mem_mb_map = _parse_engine_int_map(config.get("pipeline_engine_mem_mb", {"gnina": 8000}))
 
+# GPU scheduling for docking jobs.
+# By default, Gnina requires one GPU job slot when gnina_no_gpu is not enabled.
+gnina_gpu_default = 0 if _as_bool(getattr(getattr(oc_config, "gnina", None), "no_gpu", "no"), default=False) else 1
+pipeline_engine_gpu_default = max(0, int(config.get("pipeline_engine_gpu_default", 0)))
+pipeline_engine_gpu_map = _parse_engine_int_map(config.get("pipeline_engine_gpu", {"gnina": gnina_gpu_default}))
+
+# Optional rule priority map to bias mixed-engine scheduling.
+pipeline_engine_priority_default = max(1, int(config.get("pipeline_engine_priority_default", 50)))
+pipeline_engine_priority_map = _parse_engine_int_map(config.get("pipeline_engine_priority", {"gnina": 100}))
+
+# Optional per-engine parallel caps. When set, each engine consumes one dedicated slot.
+pipeline_engine_max_parallel_map = _parse_engine_int_map(config.get("pipeline_engine_max_parallel", {}))
+
 pipeline_postprocess_threads = max(1, int(config.get("pipeline_postprocess_threads", 1)))
 pipeline_postprocess_mem_mb = max(1, int(config.get("pipeline_postprocess_mem_mb", 4000)))
+pipeline_oddt_threads = max(1, int(config.get("pipeline_oddt_threads", 1)))
+pipeline_oddt_mem_mb = max(1, int(config.get("pipeline_oddt_mem_mb", pipeline_postprocess_mem_mb)))
+pipeline_oddt_timeout = max(0, int(config.get("pipeline_oddt_timeout", config.get("pipeline_timeout", 0) or 0) or 0))
 
 
 def _engine_threads(engine: str) -> int:
@@ -1336,6 +1534,29 @@ def _engine_mem_mb(engine: str) -> int:
     """Return configured memory budget in MB for a given engine rule instance."""
 
     return max(1, int(pipeline_engine_mem_mb_map.get(engine, pipeline_engine_mem_mb_default)))
+
+
+def _engine_gpu(engine: str) -> int:
+    """Return configured GPU slots required for a given engine rule instance."""
+
+    return max(0, int(pipeline_engine_gpu_map.get(engine, pipeline_engine_gpu_default)))
+
+
+def _engine_priority(engine: str) -> int:
+    """Return configured Snakemake priority for a given engine rule instance."""
+
+    return max(1, int(pipeline_engine_priority_map.get(engine, pipeline_engine_priority_default)))
+
+
+pipeline_total_gpus_default = 1 if _engine_gpu("gnina") > 0 else 0
+pipeline_total_gpus = max(0, int(config.get("pipeline_total_gpus", pipeline_total_gpus_default)))
+
+if "workflow" in globals():
+    # Enforce a global GPU pool directly from config, so users don't need to pass
+    # `--resources gpu=...` for common local runs.
+    workflow.global_resources["gpu"] = pipeline_total_gpus
+    for _engine_name, _limit in pipeline_engine_max_parallel_map.items():
+        workflow.global_resources[f"engine_slots_{_engine_name}"] = max(1, int(_limit))
 
 
 _timeout_raw = config.get("pipeline_timeout", None)
@@ -1360,6 +1581,8 @@ _PRESET_DATABASES = {"PDBbind", "DUDEz"}
 
 
 def _looks_like_path(value: str) -> bool:
+    """Heuristically detect whether a config token looks like a filesystem path."""
+
     text = str(value).strip()
     if not text:
         return False
@@ -1373,6 +1596,8 @@ def _looks_like_path(value: str) -> bool:
 
 
 def _validate_database_alias(alias: str, source: str) -> None:
+    """Validate a database alias used in ``database_sources`` configuration."""
+
     if not alias:
         raise RuntimeError(f"Invalid database source '{source}': empty alias.")
     if os.sep in alias or (os.altsep and os.altsep in alias):
@@ -1383,6 +1608,8 @@ def _validate_database_alias(alias: str, source: str) -> None:
 
 
 def _parse_database_sources(sources: List[str]) -> Dict[str, Dict[str, Any]]:
+    """Parse and validate configured database sources into normalized specs."""
+
     specs: Dict[str, Dict[str, Any]] = {}
     seen_aliases: Dict[str, str] = {}
 
@@ -1483,6 +1710,8 @@ for database, spec in database_specs.items():
 
 
 def _database_root_path(database: str) -> Path:
+    """Return source-root path for a configured database alias."""
+
     spec = database_specs.get(database)
     if spec is None:
         raise RuntimeError(f"Unknown database alias '{database}'. Check database_sources configuration.")
@@ -1495,6 +1724,8 @@ database_rule_root_str = str(database_rule_root)
 
 
 def _prepare_database_mounts() -> None:
+    """Create/update per-alias symlink mounts under the pipeline database root."""
+
     for database in selected_databases:
         source_root = _database_root_path(database).resolve()
         mount_path = database_rule_root / database
@@ -1527,38 +1758,56 @@ _prepare_database_mounts()
 
 
 def _database_rule_root_path(database: str) -> Path:
+    """Return mounted rule root path for a database alias."""
+
     return database_rule_root / database
 
 
 def _source_receptor_path(database: str, receptor: str) -> Path:
+    """Return receptor source file path in the original database root."""
+
     return _database_root_path(database) / receptor / "receptor.pdb"
 
 
 def _receptor_path(database: str, receptor: str) -> Path:
+    """Return receptor file path through the mounted database rule root."""
+
     return _database_rule_root_path(database) / receptor / "receptor.pdb"
 
 
 def _receptor_cache_manifest_path(database: str, receptor: str) -> Path:
+    """Return receptor cache manifest path for a receptor entry."""
+
     return _database_rule_root_path(database) / receptor / f".prepared_receptor_cache.{pipeline_cache_key}.json"
 
 
 def _target_dir_path(database: str, receptor: str, kind: str, target: str) -> Path:
+    """Return directory path for one target entry (database/receptor/kind/target)."""
+
     return _database_rule_root_path(database) / receptor / "compounds" / kind / target
 
 
 def _ligand_path(database: str, receptor: str, kind: str, target: str) -> Path:
+    """Return ligand input path (``ligand.smi``) for one target entry."""
+
     return _target_dir_path(database, receptor, kind, target) / "ligand.smi"
 
 
 def _box_path(database: str, receptor: str, kind: str, target: str) -> Path:
+    """Return default docking box path (``boxes/box0.pdb``) for one target entry."""
+
     return _target_dir_path(database, receptor, kind, target) / "boxes" / "box0.pdb"
 
 
 def _payload_path(database: str, receptor: str, kind: str, target: str) -> Path:
+    """Return final payload pickle path for one target entry."""
+
     return _target_dir_path(database, receptor, kind, target) / "payload.pkl"
 
 
 def _run_report_path(database: str, receptor: str, kind: str, target: str) -> Path:
+    """Return run-report JSON path for one target entry."""
+
     return _target_dir_path(database, receptor, kind, target) / "run_report.json"
 
 
@@ -1619,6 +1868,8 @@ if target_discovery_mode in {"index", "hybrid"}:
 
 
 def _discover_receptors_from_filesystem(database: str) -> List[str]:
+    """Discover receptor IDs by scanning ``*/receptor.pdb`` on disk."""
+
     db_dir = _database_root_path(database)
     if not db_dir.exists():
         return []
@@ -1631,6 +1882,8 @@ def _discover_receptors_from_filesystem(database: str) -> List[str]:
 
 
 def _collect_database_receptors(database: str) -> List[str]:
+    """Collect receptor IDs for one database using selected discovery mode."""
+
     receptors: List[str] = []
 
     if target_discovery_mode in {"index", "hybrid"}:
@@ -1658,10 +1911,14 @@ database_to_receptors: Dict[str, List[str]] = {
 
 
 def _target_discovery_cache_path() -> Path:
+    """Return filesystem path for target discovery cache metadata."""
+
     return _runtime_cache_root() / "target_discovery_cache.json"
 
 
 def _target_discovery_signature(database_to_receptors: Dict[str, List[str]]) -> str:
+    """Build a content signature used to validate discovery-cache reuse."""
+
     layout: List[Dict[str, Any]] = []
     for database in selected_databases:
         database_root = _database_root_path(database)
@@ -1708,6 +1965,8 @@ def _target_discovery_signature(database_to_receptors: Dict[str, List[str]]) -> 
 
 
 def _load_target_discovery_cache(signature: str) -> Optional[Tuple[List[str], int]]:
+    """Load cached discovered targets when signature and schema match."""
+
     cache_path = _target_discovery_cache_path()
     if not cache_path.is_file():
         return None
@@ -1739,6 +1998,8 @@ def _load_target_discovery_cache(signature: str) -> Optional[Tuple[List[str], in
 
 
 def _write_target_discovery_cache(signature: str, targets: List[str], scanned: int) -> None:
+    """Persist discovered target list and scan statistics to cache."""
+
     cache_path = _target_discovery_cache_path()
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
@@ -1755,6 +2016,8 @@ def _write_target_discovery_cache(signature: str, targets: List[str], scanned: i
 
 
 def collect_payload_targets():
+    """Discover and validate all pipeline payload targets across databases."""
+
     targets = []
     scanned = 0
 
@@ -1814,6 +2077,182 @@ def collect_payload_targets():
     return unique_targets
 
 
+all_payload_targets = collect_payload_targets()
+
+
+def _database_results_csv_path(database: str) -> str:
+    """Return consolidated CSV export path for one database alias."""
+
+    return str(_database_rule_root_path(database) / "pipeline_results.csv")
+
+
+def _collect_database_csv_targets() -> List[str]:
+    """Return CSV outputs requested by ``rule all`` based on config."""
+
+    if not pipeline_export_database_csv:
+        return []
+    return [_database_results_csv_path(database) for database in selected_databases]
+
+
+def _payload_targets_for_database(database: str) -> List[str]:
+    """Filter global payload targets to only those under one database root."""
+
+    db_root = _database_rule_root_path(database).resolve()
+    targets: List[str] = []
+    for payload in all_payload_targets:
+        payload_path = Path(payload).resolve()
+        try:
+            payload_path.relative_to(db_root)
+        except ValueError:
+            continue
+        targets.append(str(payload_path))
+    return sorted(set(targets))
+
+
+def _csv_scalar(value: Any) -> str:
+    """Convert values to stable scalar strings for CSV serialization."""
+
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, str):
+        return value
+    return json.dumps(_to_jsonable(value), sort_keys=True)
+
+
+def _csv_key(value: Any) -> str:
+    """Normalize free-form keys into safe lowercase CSV column identifiers."""
+
+    key = str(value).strip().lower()
+    key = re.sub(r"[^0-9a-zA-Z_]+", "_", key)
+    key = re.sub(r"_+", "_", key).strip("_")
+    return key or "score"
+
+
+def _flatten_summary_rescoring_for_csv(summary: Dict[str, Any]) -> Dict[str, float]:
+    """Flatten summary rescoring payloads into tabular CSV columns."""
+
+    flattened: Dict[str, float] = {}
+
+    def _ingest_rescoring(rescoring_data: Any, prefix: str = "") -> None:
+        if not isinstance(rescoring_data, dict):
+            return
+        for engine, engine_scores in rescoring_data.items():
+            if not isinstance(engine_scores, dict):
+                continue
+            for raw_key, raw_value in engine_scores.items():
+                numeric = _to_numeric(raw_value if not isinstance(raw_value, (list, tuple)) else raw_value[0])
+                if numeric is None:
+                    continue
+                canonical = _canonicalize_rescore_key(str(engine), str(raw_key))
+                col = f"{prefix}{_csv_key(canonical)}"
+                flattened[col] = float(numeric)
+
+    _ingest_rescoring(summary.get("rescoring"), prefix="")
+
+    box_summaries = summary.get("box_summaries")
+    if isinstance(box_summaries, dict):
+        for box_name, box_data in box_summaries.items():
+            if not isinstance(box_data, dict):
+                continue
+            box_prefix = f"{_csv_key(box_name)}__"
+            _ingest_rescoring(box_data.get("rescoring"), prefix=box_prefix)
+
+    return flattened
+
+
+def _write_database_results_csv(database: str, payload_paths: List[str], csv_path: Union[str, Path]) -> None:
+    """Write a consolidated per-database CSV from target payload pickles."""
+
+    import csv
+
+    output_path = Path(csv_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    rows: List[Dict[str, Any]] = []
+    score_columns: Set[str] = set()
+    for payload_path in sorted(set(payload_paths)):
+        payload_file = Path(payload_path)
+        if not payload_file.is_file():
+            continue
+
+        try:
+            with payload_file.open("rb") as handle:
+                payload = pickle.load(handle)
+        except Exception as exc:
+            rows.append(
+                {
+                    "database": database,
+                    "payload_path": str(payload_file),
+                    "error": f"failed to read payload: {type(exc).__name__}: {exc}",
+                }
+            )
+            continue
+
+        summary = payload.get("summary", {})
+        if not isinstance(summary, dict):
+            summary = {}
+
+        row: Dict[str, Any] = {
+            "database": str(payload.get("database", database)),
+            "receptor": str(payload.get("receptor", "")),
+            "kind": str(payload.get("kind", "")),
+            "target": str(payload.get("target", "")),
+            "name": str(payload.get("name", "")),
+            "pipeline_version": str(payload.get("pipeline_version", pipeline_version)),
+            "representative_pose": _csv_scalar(payload.get("representative_pose")),
+            "representative_engine": _csv_scalar(payload.get("representative_engine")),
+            "payload_path": str(payload_file),
+            "summary_path": str(payload_file.parent / "summary.json"),
+            "run_report_path": _csv_scalar(payload.get("run_report")),
+            "clustering_total_poses": _csv_scalar(summary.get("clustering", {}).get("total_poses") if isinstance(summary.get("clustering"), dict) else None),
+            "clustering_representative_selection": _csv_scalar(summary.get("clustering", {}).get("representative_selection") if isinstance(summary.get("clustering"), dict) else None),
+            "all_boxes": _csv_scalar(summary.get("all_boxes", False)),
+            "rescoring_json": json.dumps(_to_jsonable(summary.get("rescoring", {})), sort_keys=True),
+            "summary_json": json.dumps(_to_jsonable(summary), sort_keys=True),
+            "error": "",
+        }
+
+        flattened_scores = _flatten_summary_rescoring_for_csv(summary)
+        for score_key, score_value in flattened_scores.items():
+            row[score_key] = score_value
+            score_columns.add(score_key)
+
+        rows.append(row)
+
+    base_columns = [
+        "database",
+        "receptor",
+        "kind",
+        "target",
+        "name",
+        "pipeline_version",
+        "representative_pose",
+        "representative_engine",
+        "payload_path",
+        "summary_path",
+        "run_report_path",
+        "clustering_total_poses",
+        "clustering_representative_selection",
+        "all_boxes",
+    ]
+    trailing_columns = [
+        "rescoring_json",
+        "summary_json",
+        "error",
+    ]
+    fieldnames = base_columns + sorted(score_columns) + trailing_columns
+
+    with output_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore")
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({key: _csv_scalar(row.get(key)) for key in fieldnames})
+
+
 def _engine_summary_path(database: str, receptor: str, kind: str, target: str, engine: str) -> str:
     '''Build the per-engine summary output path for a target entry.
 
@@ -1865,7 +2304,355 @@ def _engine_summary_inputs(wildcards) -> List[str]:
     ]
 
 
+def _pipeline_core_summary_path(database: str, receptor: str, kind: str, target: str) -> str:
+    """Build the intermediate core-summary path for one target entry."""
+
+    return str(_target_dir_path(database, receptor, kind, target) / "pipeline_core_summary.json")
+
+
+def _oddt_status_path(database: str, receptor: str, kind: str, target: str) -> str:
+    """Build the intermediate ODDT status path for one target entry."""
+
+    return str(_target_dir_path(database, receptor, kind, target) / "oddt_status.json")
+
+
+def _wc_core_summary_path(wildcards) -> str:
+    """Resolve core-summary intermediate path from Snakemake wildcards."""
+
+    return _pipeline_core_summary_path(wildcards.database, wildcards.receptor, wildcards.kind, wildcards.target)
+
+
+def _wc_oddt_status_path(wildcards) -> str:
+    """Resolve ODDT-status intermediate path from Snakemake wildcards."""
+
+    return _oddt_status_path(wildcards.database, wildcards.receptor, wildcards.kind, wildcards.target)
+
+
+def _collect_pipeline_summary(
+    target_dir: Path,
+    job_name: str,
+) -> Tuple[Dict[str, Any], Optional[Path], List[Path]]:
+    """Load summary outputs generated by post-processing for one target."""
+
+    summary_path = target_dir / "summary.json"
+    summary_output_path: Optional[Path] = None
+    per_box_summary_paths: List[Path] = []
+
+    if summary_path.exists():
+        with summary_path.open("r", encoding="utf-8") as handle:
+            summary = json.load(handle)
+        summary_output_path = summary_path
+        return summary, summary_output_path, per_box_summary_paths
+
+    if pipeline_all_boxes:
+        per_box_summary: Dict[str, Any] = {}
+        for box_summary_path in sorted(target_dir.glob("box*/summary.json")):
+            per_box_summary_paths.append(box_summary_path)
+            with box_summary_path.open("r", encoding="utf-8") as handle:
+                per_box_summary[box_summary_path.parent.name] = json.load(handle)
+
+        if not per_box_summary:
+            raise RuntimeError(
+                "Pipeline output missing summary.json and no per-box summaries were found under "
+                f"{target_dir}."
+            )
+
+        summary = {
+            "job": job_name,
+            "pipeline_version": pipeline_version,
+            "all_boxes": True,
+            "box_summaries": per_box_summary,
+        }
+        return summary, None, per_box_summary_paths
+
+    raise RuntimeError(f"Pipeline output missing summary.json at: {summary_path}")
+
+
+def _write_json(path: Union[str, Path], payload: Any) -> None:
+    """Write JSON payload with stable formatting."""
+
+    out_path = Path(path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(json.dumps(_to_jsonable(payload), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _find_prepared_receptor_for_oddt(receptor_path: Union[str, Path]) -> Optional[Path]:
+    """Locate a prepared receptor suitable for ODDT rescoring."""
+
+    receptor_path = Path(receptor_path)
+    receptor_dir = receptor_path.resolve().parent
+    candidates = [
+        receptor_dir / "prepared_receptor.pdbqt",
+        receptor_dir / "prepared_receptor.mol2",
+        receptor_path,
+    ]
+    for candidate in candidates:
+        if _is_valid_file(candidate):
+            return candidate
+    return None
+
+
+def _extract_oddt_scores_from_dataframe(data: Any) -> Dict[str, float]:
+    """Convert the first-row ODDT API DataFrame into canonical `oddt_*` keys."""
+
+    scores: Dict[str, float] = {}
+    if data is None or not hasattr(data, "empty") or bool(getattr(data, "empty", True)):
+        return scores
+
+    try:
+        first_row = data.iloc[0].to_dict()
+    except Exception:
+        return scores
+
+    def _coerce_numeric(value: Any) -> Optional[float]:
+        numeric = _to_numeric(value)
+        if numeric is not None:
+            return float(numeric)
+        if isinstance(value, str):
+            try:
+                parsed = float(value.strip())
+                return parsed if not math.isnan(parsed) and not math.isinf(parsed) else None
+            except (TypeError, ValueError):
+                return None
+        if isinstance(value, (list, tuple)) and value:
+            return _coerce_numeric(value[0])
+        return None
+
+    for raw_key, raw_value in first_row.items():
+        key = str(raw_key or "").strip()
+        if not key or key.lower() in {"ligand_name", "name", "title"}:
+            continue
+        numeric_value = _coerce_numeric(raw_value)
+        if numeric_value is None:
+            continue
+        canonical = _canonicalize_rescore_key("oddt", key)
+        scores[canonical] = float(numeric_value)
+
+    return scores
+
+
+def _run_oddt_api_once(
+    *,
+    receptor_path: str,
+    ligand_path: str,
+    run_name: str,
+    output_dir: str,
+    threads_hint: int,
+    chunksize: int,
+) -> Dict[str, Any]:
+    """Execute ODDT API once and return parsed status payload."""
+
+    try:
+        import OCDocker.Rescoring.ODDT as ocoddt
+
+        completed = ocoddt.run_oddt(
+            receptor_path,
+            ligand_path,
+            run_name,
+            output_dir,
+            returnData=True,
+            overwrite=True,
+            n_cpu=max(1, int(threads_hint)),
+            chunksize=max(1, int(chunksize)),
+        )
+        if isinstance(completed, int):
+            return {
+                "success": False,
+                "scores": {},
+                "returncode": int(completed),
+                "error": f"ODDT API returned non-zero code: {completed}",
+            }
+
+        scores = _extract_oddt_scores_from_dataframe(completed)
+        if not scores:
+            return {
+                "success": False,
+                "scores": {},
+                "returncode": 0,
+                "error": "ODDT API completed but produced no numeric scores.",
+            }
+
+        return {"success": True, "scores": scores, "returncode": 0, "error": ""}
+    except Exception as exc:
+        return {
+            "success": False,
+            "scores": {},
+            "returncode": 1,
+            "error": f"ODDT API execution failed: {type(exc).__name__}: {exc}",
+        }
+
+
+def _run_oddt_api_worker(
+    queue: Any,
+    *,
+    receptor_path: str,
+    ligand_path: str,
+    run_name: str,
+    output_dir: str,
+    threads_hint: int,
+    chunksize: int,
+) -> None:
+    """Execute ODDT API in a worker process and publish parsed payload to a queue."""
+
+    queue.put(
+        _run_oddt_api_once(
+            receptor_path=receptor_path,
+            ligand_path=ligand_path,
+            run_name=run_name,
+            output_dir=output_dir,
+            threads_hint=threads_hint,
+            chunksize=chunksize,
+        )
+    )
+
+
+def _run_oddt_api_for_pose(
+    *,
+    receptor_path: Path,
+    ligand_path: Path,
+    output_dir: Path,
+    run_name: str,
+    timeout_seconds: int,
+    threads_hint: int,
+) -> Dict[str, Any]:
+    """Run ODDT API for one representative pose and return status payload."""
+
+    result: Dict[str, Any] = {
+        "success": False,
+        "scores": {},
+        "error": "",
+        "output_csv": "",
+        "returncode": None,
+        "mode": "ocdocker_api",
+    }
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_csv = output_dir / f"{run_name}.csv"
+    result["output_csv"] = str(output_csv)
+
+    chunksize_raw = getattr(getattr(get_config(), "oddt", None), "chunk_size", 100)
+    try:
+        chunksize = max(1, int(chunksize_raw))
+    except (TypeError, ValueError):
+        chunksize = 100
+
+    try:
+        if timeout_seconds > 0:
+            ctx = mp.get_context("fork" if hasattr(os, "fork") else "spawn")
+            queue = ctx.Queue(maxsize=1)
+            process = ctx.Process(
+                target=_run_oddt_api_worker,
+                kwargs={
+                    "queue": queue,
+                    "receptor_path": str(receptor_path),
+                    "ligand_path": str(ligand_path),
+                    "run_name": run_name,
+                    "output_dir": str(output_dir),
+                    "threads_hint": max(1, int(threads_hint)),
+                    "chunksize": chunksize,
+                },
+            )
+            process.start()
+            process.join(timeout=timeout_seconds)
+            if process.is_alive():
+                process.terminate()
+                process.join(timeout=5)
+                result["error"] = (
+                    f"ODDT timed out after {timeout_seconds}s while scoring {ligand_path.name}."
+                    if timeout_seconds > 0
+                    else f"ODDT timed out while scoring {ligand_path.name}."
+                )
+                return result
+
+            completed = queue.get_nowait() if not queue.empty() else None
+            queue.close()
+            queue.join_thread()
+        else:
+            completed = _run_oddt_api_once(
+                receptor_path=str(receptor_path),
+                ligand_path=str(ligand_path),
+                run_name=run_name,
+                output_dir=str(output_dir),
+                threads_hint=max(1, int(threads_hint)),
+                chunksize=chunksize,
+            )
+    except Exception as exc:
+        result["error"] = f"ODDT API execution failed: {type(exc).__name__}: {exc}"
+        return result
+
+    if not isinstance(completed, dict):
+        result["error"] = "ODDT API returned no data."
+        return result
+
+    result["returncode"] = int(completed.get("returncode", 0) or 0)
+    result["error"] = str(completed.get("error", "") or "")
+    scores = completed.get("scores", {})
+    if not isinstance(scores, dict):
+        scores = {}
+
+    if not bool(completed.get("success", False)):
+        if not result["error"]:
+            result["error"] = "ODDT API execution failed."
+        return result
+
+    if not scores:
+        result["error"] = "ODDT API completed but produced no numeric scores."
+        return result
+
+    result["scores"] = scores
+    result["success"] = True
+    return result
+
+
+def _apply_oddt_status_to_summary(summary: Dict[str, Any], oddt_status: Dict[str, Any]) -> Dict[str, Any]:
+    """Merge dedicated ODDT rule scores into a pipeline summary payload."""
+
+    def _merge_scores(target_summary: Dict[str, Any], scores: Dict[str, Any]) -> None:
+        if not isinstance(scores, dict) or not scores:
+            return
+
+        existing_rescoring = target_summary.get("rescoring")
+        if not isinstance(existing_rescoring, dict):
+            existing_rescoring = {}
+        existing_rescoring["oddt"] = {
+            str(key): float(value) for key, value in scores.items() if _to_numeric(value) is not None
+        }
+        target_summary["rescoring"] = existing_rescoring
+
+        existing_engines = target_summary.get("rescoring_engines")
+        if isinstance(existing_engines, list):
+            engine_set = {str(engine).strip().lower() for engine in existing_engines if str(engine).strip()}
+        else:
+            engine_set = {str(engine).strip().lower() for engine in existing_rescoring.keys()}
+        engine_set.add("oddt")
+        target_summary["rescoring_engines"] = sorted(engine_set)
+
+    entries = oddt_status.get("entries", {}) if isinstance(oddt_status, dict) else {}
+    if not isinstance(entries, dict):
+        entries = {}
+
+    box_summaries = summary.get("box_summaries")
+    if isinstance(box_summaries, dict):
+        for box_name, box_entry in entries.items():
+            if not isinstance(box_entry, dict):
+                continue
+            if not bool(box_entry.get("success", False)):
+                continue
+            if box_name not in box_summaries or not isinstance(box_summaries[box_name], dict):
+                continue
+            _merge_scores(box_summaries[box_name], box_entry.get("scores", {}))
+    else:
+        root_entry = entries.get("__root__")
+        if isinstance(root_entry, dict) and bool(root_entry.get("success", False)):
+            _merge_scores(summary, root_entry.get("scores", {}))
+
+    summary["oddt_status"] = oddt_status
+    return summary
+
+
 def _preset_receptor_inputs(preset_name: str) -> List[str]:
+    """Collect receptor rule inputs for a preset dataset family alias."""
+
     paths: List[str] = []
     for database in preset_database_aliases.get(preset_name, []):
         for receptor in database_to_receptors.get(database, []):
@@ -1874,22 +2661,32 @@ def _preset_receptor_inputs(preset_name: str) -> List[str]:
 
 
 def _wc_receptor_path(wildcards) -> str:
+    """Resolve receptor input path from Snakemake wildcards."""
+
     return str(_receptor_path(wildcards.database, wildcards.receptor))
 
 
 def _wc_receptor_cache_manifest_path(wildcards) -> str:
+    """Resolve receptor cache-manifest path from Snakemake wildcards."""
+
     return str(_receptor_cache_manifest_path(wildcards.database, wildcards.receptor))
 
 
 def _wc_ligand_path(wildcards) -> str:
+    """Resolve ligand input path from Snakemake wildcards."""
+
     return str(_ligand_path(wildcards.database, wildcards.receptor, wildcards.kind, wildcards.target))
 
 
 def _wc_box_path(wildcards) -> str:
+    """Resolve default box input path from Snakemake wildcards."""
+
     return str(_box_path(wildcards.database, wildcards.receptor, wildcards.kind, wildcards.target))
 
 
 def _wc_ligand_cache_manifest_path(wildcards) -> str:
+    """Resolve ligand cache-manifest path from Snakemake wildcards."""
+
     return _ligand_cache_manifest_path(wildcards.database, wildcards.receptor, wildcards.kind, wildcards.target)
 
 
@@ -2275,7 +3072,7 @@ def _postprocess_pipeline_box(
     Returns
     -------
     int
-        ``0`` on success, non-zero when no valid poses were available.
+        ``0`` on success, non-zero when strict clustering prerequisites fail.
     '''
 
     import numpy as np
@@ -2294,14 +3091,15 @@ def _postprocess_pipeline_box(
     pose_engine_map: Dict[str, str] = {}
     ctx: Dict[str, Dict[str, str]] = {}
     engine_errors: Dict[str, str] = {}
+    engine_pose_counts: Dict[str, int] = {}
 
     for engine in pipeline_engines:
         box_result = engine_box_results.get(engine, {})
         if not isinstance(box_result, dict):
+            engine_errors[engine] = "missing engine status payload"
             continue
         if not box_result.get("success", False):
-            if box_result.get("error"):
-                engine_errors[engine] = str(box_result["error"])
+            engine_errors[engine] = str(box_result.get("error", "engine reported unsuccessful status"))
             continue
 
         poses = [str(p) for p in box_result.get("poses", []) if _is_valid_file(p)]
@@ -2309,6 +3107,7 @@ def _postprocess_pipeline_box(
             engine_errors[engine] = "no valid poses"
             continue
 
+        engine_pose_counts[engine] = len(poses)
         all_poses.extend(poses)
         for pose in poses:
             pose_engine_map[pose] = engine
@@ -2320,7 +3119,16 @@ def _postprocess_pipeline_box(
 
     if engine_errors:
         for engine, message in sorted(engine_errors.items()):
-            print(f"Warning: {engine} failed for {job_name}: {message}")
+            print(f"Error: {engine} failed for {job_name}: {message}")
+
+    missing_pose_engines = [engine for engine in pipeline_engines if engine_pose_counts.get(engine, 0) < 1]
+    if missing_pose_engines:
+        box_suffix = f" ({box_label})" if box_label else ""
+        print(
+            f"Error: strict clustering requires at least one valid pose from every configured docking engine for "
+            f"{job_name}{box_suffix}. Missing/empty engines: {', '.join(sorted(missing_pose_engines))}"
+        )
+        return 2
 
     if not all_poses:
         return 2
@@ -2334,15 +3142,20 @@ def _postprocess_pipeline_box(
     rmsd_df = pd.DataFrame(rmsd).loc[mol2_list, mol2_list]
     rmsd_df.to_csv(outdir / "rmsd_matrix.csv")
 
-    clusters = ocrmsd.cluster_rmsd(
-        rmsd_df,
-        min_distance_threshold=pipeline_cluster_min,
-        max_distance_threshold=pipeline_cluster_max,
-        threshold_step=pipeline_cluster_step,
-        outputPlot=str(outdir / "clustering_dendrogram.png"),
-        molecule_name=job_name,
-        pose_engine_map=pose_engine_map,
-    )
+    try:
+        clusters = ocrmsd.cluster_rmsd(
+            rmsd_df,
+            min_distance_threshold=pipeline_cluster_min,
+            max_distance_threshold=pipeline_cluster_max,
+            threshold_step=pipeline_cluster_step,
+            outputPlot=str(outdir / "clustering_dendrogram.png"),
+            molecule_name=job_name,
+            pose_engine_map=pose_engine_map,
+        )
+    except Exception as exc:
+        box_suffix = f" ({box_label})" if box_label else ""
+        print(f"Error: clustering failed for {job_name}{box_suffix}: {type(exc).__name__}: {exc}")
+        return 3
 
     clustering_info: Dict[str, Any] = {
         "method": "rmsd_based_clustering",
@@ -2353,33 +3166,37 @@ def _postprocess_pipeline_box(
     }
 
     if isinstance(clusters, int) or getattr(clusters, "size", 0) == 0:
-        representative_mol2 = mol2_list[0]
-        clustering_info["representative_selection"] = "first_pose_fallback"
-        clustering_info["reason"] = "clustering_failed_or_no_labels"
-    else:
-        cluster_assignments = pd.DataFrame({"pose_path": mol2_list, "cluster_id": clusters})
-        cluster_assignments.to_csv(outdir / "cluster_assignments.csv", index=False)
+        box_suffix = f" ({box_label})" if box_label else ""
+        print(f"Error: clustering produced no labels for {job_name}{box_suffix}.")
+        return 3
 
-        cluster_sizes: Dict[int, int] = {}
-        unique_clusters, counts = np.unique(clusters, return_counts=True)
-        for cluster_id, size in zip(unique_clusters, counts):
-            cluster_sizes[int(cluster_id)] = int(size)
+    cluster_assignments = pd.DataFrame({"pose_path": mol2_list, "cluster_id": clusters})
+    cluster_assignments.to_csv(outdir / "cluster_assignments.csv", index=False)
 
+    cluster_sizes: Dict[int, int] = {}
+    unique_clusters, counts = np.unique(clusters, return_counts=True)
+    for cluster_id, size in zip(unique_clusters, counts):
+        cluster_sizes[int(cluster_id)] = int(size)
+
+    try:
         medoids = ocrmsd.get_medoids(rmsd_df, clusters, onlyBiggest=True)
-        if medoids:
-            representative_mol2 = medoids[0]
-            clustering_info["representative_selection"] = "medoid_of_largest_cluster"
-            clustering_info["medoids"] = [str(medoid) for medoid in medoids]
-        else:
-            representative_mol2 = mol2_list[0]
-            clustering_info["representative_selection"] = "first_pose_fallback"
-            clustering_info["reason"] = "no_medoid_found"
+    except Exception as exc:
+        box_suffix = f" ({box_label})" if box_label else ""
+        print(f"Error: medoid selection failed for {job_name}{box_suffix}: {type(exc).__name__}: {exc}")
+        return 3
+    if not medoids:
+        box_suffix = f" ({box_label})" if box_label else ""
+        print(f"Error: clustering returned no medoids for {job_name}{box_suffix}.")
+        return 3
 
-        clustering_info["cluster_sizes"] = cluster_sizes
-        rep_idx = mol2_list.index(representative_mol2)
-        rep_cluster = int(clusters[rep_idx])
-        clustering_info["representative_cluster_id"] = rep_cluster
-        clustering_info["representative_cluster_size"] = cluster_sizes.get(rep_cluster, 0)
+    representative_mol2 = medoids[0]
+    clustering_info["representative_selection"] = "medoid_of_largest_cluster"
+    clustering_info["medoids"] = [str(medoid) for medoid in medoids]
+    clustering_info["cluster_sizes"] = cluster_sizes
+    rep_idx = mol2_list.index(representative_mol2)
+    rep_cluster = int(clusters[rep_idx])
+    clustering_info["representative_cluster_id"] = rep_cluster
+    clustering_info["representative_cluster_size"] = cluster_sizes.get(rep_cluster, 0)
 
     representative_original = mol2_map.get(representative_mol2, representative_mol2)
     representative_engine = pose_engine_map.get(str(representative_original), "")
@@ -2567,44 +3384,8 @@ def _postprocess_pipeline_box(
         if plants_scores:
             rescoring["plants"] = plants_scores
 
-    if "oddt" in pipeline_rescoring_engines_set:
-        try:
-            from OCDocker.Rescoring.ODDT import df_to_dict, run_oddt
-
-            prepared_receptor: Optional[Path] = None
-            for engine_name in ("vina", "smina", "gnina", "plants"):
-                prep_path = Path(ctx.get(engine_name, {}).get("prep_rec", ""))
-                if _is_valid_file(prep_path):
-                    prepared_receptor = prep_path
-                    break
-
-            oddt_ligand = representative_mol2_final if representative_mol2_final and representative_mol2_final.exists() else representative_pose_path
-            if prepared_receptor is not None and oddt_ligand.exists():
-                oddt_output = outdir / "oddt_rescoring"
-                oddt_output.mkdir(parents=True, exist_ok=True)
-                oddt_result = run_oddt(
-                    str(prepared_receptor),
-                    str(oddt_ligand),
-                    job_name,
-                    str(oddt_output),
-                    overwrite=True,
-                    returnData=True,
-                )
-                if oddt_result is not None and not isinstance(oddt_result, int):
-                    oddt_dict = df_to_dict(oddt_result)
-                    if isinstance(oddt_dict, dict) and oddt_dict:
-                        oddt_scores: Dict[str, float] = {}
-                        first_key = list(oddt_dict.keys())[0]
-                        for score_name, score_value in oddt_dict[first_key].items():
-                            if str(score_name).strip().lower() in {"ligand_name", "name"}:
-                                continue
-                            numeric = _to_numeric(score_value if not isinstance(score_value, (list, tuple)) else score_value[0])
-                            if numeric is not None:
-                                oddt_scores[f"oddt_{score_name}"] = float(numeric)
-                        if oddt_scores:
-                            rescoring["oddt"] = oddt_scores
-        except Exception:
-            pass
+    # ODDT rescoring runs in a dedicated Snakemake rule (`run_oddt`) so that
+    # failures/timeouts are isolated from core post-processing.
 
     summary = {
         "job": job_name if box_label is None else f"{job_name}_{box_label}",
@@ -2874,15 +3655,57 @@ rule prepare_ligand_cache:
         )
 
 
-rule run_engine:
-    """
-    Run one docking engine (full API path) for one target entry.
+def _run_engine_job(*, wildcards, rule_input, rule_output, threads_count: int, engine_name: str) -> None:
+    """Execute one engine job and persist status/progress metadata."""
 
-    This rule is engine-scoped by wildcard and can run in parallel with other
-    engines for the same molecule. Ligand preparation is consumed from
-    ``prepare_ligand_cache`` outputs. Engine status is persisted in
-    ``engine_status/{engine}.json``.
-    """
+    threads_count = _apply_thread_limit_env(int(threads_count))
+
+    target_dir = Path(os.path.dirname(str(rule_input.ligand)))
+    target_dir.mkdir(parents=True, exist_ok=True)
+    if not _cached_receptor_files_present(str(rule_input.receptor)):
+        _ensure_receptor_cache_ready(str(rule_input.receptor), str(rule_input.receptor_cache))
+
+    job_name = f"{wildcards.database}_{wildcards.receptor}_{wildcards.kind}_{wildcards.target}"
+    _store_engine_progress_in_db(
+        job_name=job_name,
+        database=wildcards.database,
+        receptor=wildcards.receptor,
+        kind=wildcards.kind,
+        target=wildcards.target,
+        engine=engine_name,
+        phase="running",
+    )
+
+    summary = _run_single_engine_via_api(
+        engine=engine_name,
+        receptor_path=str(rule_input.receptor),
+        ligand_path=str(rule_input.ligand),
+        box_path=str(rule_input.box),
+        outdir_path=str(target_dir),
+        job_name=job_name,
+        max_workers=threads_count,
+    )
+
+    out_path = Path(str(rule_output.summary))
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+
+    _store_engine_progress_in_db(
+        job_name=job_name,
+        database=wildcards.database,
+        receptor=wildcards.receptor,
+        kind=wildcards.kind,
+        target=wildcards.target,
+        engine=engine_name,
+        phase="completed" if bool(summary.get("success", False)) else "failed",
+        summary_path=str(rule_output.summary),
+        summary=summary,
+    )
+
+
+rule run_engine_vina:
+    """Run Vina for one target entry and persist engine status."""
+
     input:
         receptor=_wc_receptor_path,
         receptor_cache=_wc_receptor_cache_manifest_path,
@@ -2898,44 +3721,106 @@ rule run_engine:
             "{kind}",
             "{target}",
             "engine_status",
-            "{engine}.json",
+            "vina.json",
         ),
-    threads:
-        lambda wildcards: _engine_threads(wildcards.engine)
+    threads: _engine_threads("vina")
+    priority: _engine_priority("vina")
     resources:
-        mem_mb=lambda wildcards: _engine_mem_mb(wildcards.engine)
+        mem_mb=_engine_mem_mb("vina"),
+        gpu=_engine_gpu("vina"),
+        engine_slots_vina=1
     run:
-        # Keep BLAS/OMP consumers aligned with Snakemake scheduling for each engine job.
-        for env_name in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
-            os.environ[env_name] = str(threads)
-
-        target_dir = Path(os.path.dirname(input.ligand))
-        target_dir.mkdir(parents=True, exist_ok=True)
-        if not _cached_receptor_files_present(str(input.receptor)):
-            _ensure_receptor_cache_ready(str(input.receptor), str(input.receptor_cache))
-
-        job_name = f"{wildcards.database}_{wildcards.receptor}_{wildcards.kind}_{wildcards.target}"
-        summary = _run_single_engine_via_api(
-            engine=wildcards.engine,
-            receptor_path=str(input.receptor),
-            ligand_path=str(input.ligand),
-            box_path=str(input.box),
-            outdir_path=str(target_dir),
-            job_name=job_name,
-            max_workers=int(threads),
+        _run_engine_job(
+            wildcards=wildcards,
+            rule_input=input,
+            rule_output=output,
+            threads_count=int(threads),
+            engine_name="vina",
         )
 
-        out_path = Path(str(output.summary))
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        out_path.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+
+rule run_engine_gnina:
+    """Run Gnina for one target entry and persist engine status."""
+
+    input:
+        receptor=_wc_receptor_path,
+        receptor_cache=_wc_receptor_cache_manifest_path,
+        ligand=_wc_ligand_path,
+        box=_wc_box_path,
+        ligand_cache=_wc_ligand_cache_manifest_path,
+    output:
+        summary=os.path.join(
+            database_rule_root_str,
+            "{database}",
+            "{receptor}",
+            "compounds",
+            "{kind}",
+            "{target}",
+            "engine_status",
+            "gnina.json",
+        ),
+    threads: _engine_threads("gnina")
+    priority: _engine_priority("gnina")
+    resources:
+        mem_mb=_engine_mem_mb("gnina"),
+        gpu=_engine_gpu("gnina"),
+        engine_slots_gnina=1
+    run:
+        _run_engine_job(
+            wildcards=wildcards,
+            rule_input=input,
+            rule_output=output,
+            threads_count=int(threads),
+            engine_name="gnina",
+        )
 
 
-rule run_pipeline:
+rule run_engine_plants:
+    """Run PLANTS for one target entry and persist engine status."""
+
+    input:
+        receptor=_wc_receptor_path,
+        receptor_cache=_wc_receptor_cache_manifest_path,
+        ligand=_wc_ligand_path,
+        box=_wc_box_path,
+        ligand_cache=_wc_ligand_cache_manifest_path,
+    output:
+        summary=os.path.join(
+            database_rule_root_str,
+            "{database}",
+            "{receptor}",
+            "compounds",
+            "{kind}",
+            "{target}",
+            "engine_status",
+            "plants.json",
+        ),
+    threads: _engine_threads("plants")
+    priority: _engine_priority("plants")
+    resources:
+        mem_mb=_engine_mem_mb("plants"),
+        gpu=_engine_gpu("plants"),
+        engine_slots_plants=1
+    run:
+        _run_engine_job(
+            wildcards=wildcards,
+            rule_input=input,
+            rule_output=output,
+            threads_count=int(threads),
+            engine_name="plants",
+        )
+
+
+# Pipeline finalization stages:
+# 1) run_pipeline_core: postprocess/clustering + non-ODDT rescoring.
+# 2) run_oddt: isolated ODDT API execution with timeout handling.
+# 3) run_pipeline: merge results and write payload/report artifacts.
+rule run_pipeline_core:
     """
-    Aggregate per-engine outputs, run clustering/rescoring, and write payload/report.
+    Aggregate per-engine outputs and write an intermediate core summary.
 
-    The docking stage is intentionally delegated to ``run_engine`` jobs so this
-    rule only performs post-processing and DB persistence.
+    This stage performs clustering and non-ODDT rescoring only. ODDT runs in a
+    dedicated downstream rule for better isolation.
     """
     input:
         receptor=_wc_receptor_path,
@@ -2943,6 +3828,185 @@ rule run_pipeline:
         ligand=_wc_ligand_path,
         box=_wc_box_path,
         engine_summaries=_engine_summary_inputs,
+    output:
+        core_summary=os.path.join(
+            database_rule_root_str,
+            "{database}",
+            "{receptor}",
+            "compounds",
+            "{kind}",
+            "{target}",
+            "pipeline_core_summary.json",
+        ),
+    threads: pipeline_postprocess_threads
+    resources:
+        mem_mb=pipeline_postprocess_mem_mb
+    run:
+        threads_count = _apply_thread_limit_env(int(threads))
+
+        target_dir = Path(os.path.dirname(input.ligand))
+        target_dir.mkdir(parents=True, exist_ok=True)
+
+        job_name = f"{wildcards.database}_{wildcards.receptor}_{wildcards.kind}_{wildcards.target}"
+        if not _cached_receptor_files_present(str(input.receptor)):
+            _ensure_receptor_cache_ready(str(input.receptor), str(input.receptor_cache))
+        rc = _run_pipeline_postprocess_from_summaries(
+            receptor_path=str(input.receptor),
+            ligand_path=str(input.ligand),
+            box_path=str(input.box),
+            outdir_path=str(target_dir),
+            job_name=job_name,
+            engine_summary_paths=list(input.engine_summaries),
+            max_workers=threads_count,
+        )
+        if rc != 0:
+            raise RuntimeError(
+                f"OCDocker pipeline failed for {wildcards.database}/{wildcards.receptor}/{wildcards.kind}/{wildcards.target} "
+                f"with return code {rc}."
+            )
+
+        summary, summary_output_path, per_box_summary_paths = _collect_pipeline_summary(
+            target_dir=target_dir,
+            job_name=job_name,
+        )
+        core_payload = {
+            "job_name": job_name,
+            "summary": summary,
+            "summary_output_path": str(summary_output_path) if summary_output_path else "",
+            "per_box_summary_paths": [str(path) for path in per_box_summary_paths],
+        }
+        _write_json(output.core_summary, core_payload)
+
+
+rule run_oddt:
+    """
+    Run ODDT rescoring through OCDocker API and persist status for final aggregation.
+    """
+    input:
+        receptor=_wc_receptor_path,
+        ligand=_wc_ligand_path,
+        core_summary=_wc_core_summary_path,
+    output:
+        oddt_status=os.path.join(
+            database_rule_root_str,
+            "{database}",
+            "{receptor}",
+            "compounds",
+            "{kind}",
+            "{target}",
+            "oddt_status.json",
+        ),
+    threads: pipeline_oddt_threads
+    resources:
+        mem_mb=pipeline_oddt_mem_mb
+    run:
+        threads_count = _apply_thread_limit_env(int(threads))
+
+        target_dir = Path(os.path.dirname(input.ligand))
+        target_dir.mkdir(parents=True, exist_ok=True)
+        job_name = f"{wildcards.database}_{wildcards.receptor}_{wildcards.kind}_{wildcards.target}"
+
+        # `run_pipeline_core` already produced the representative pose(s) and
+        # non-ODDT rescoring; this rule only adds ODDT outcomes.
+        with Path(str(input.core_summary)).open("r", encoding="utf-8") as handle:
+            core_payload = json.load(handle)
+        summary = core_payload.get("summary", {})
+        if not isinstance(summary, dict):
+            summary = {}
+
+        oddt_status: Dict[str, Any] = {
+            "enabled": "oddt" in pipeline_rescoring_engines_set,
+            "success": False,
+            "phase": "pending",
+            "timeout_seconds": pipeline_oddt_timeout,
+            "entries": {},
+        }
+
+        if "oddt" not in pipeline_rescoring_engines_set:
+            oddt_status["phase"] = "skipped"
+            oddt_status["reason"] = "oddt not enabled in pipeline_rescoring_engines"
+            _write_json(output.oddt_status, oddt_status)
+            return
+
+        prepared_receptor = _find_prepared_receptor_for_oddt(str(input.receptor))
+        if prepared_receptor is None:
+            oddt_status["phase"] = "failed"
+            oddt_status["reason"] = (
+                "No prepared receptor file found for ODDT. Checked prepared_receptor.pdbqt, "
+                "prepared_receptor.mol2, and receptor input path."
+            )
+            _write_json(output.oddt_status, oddt_status)
+            return
+
+        box_summaries = summary.get("box_summaries")
+        if isinstance(box_summaries, dict):
+            # Multi-box mode: score each box representative independently.
+            for box_name, box_data in sorted(box_summaries.items()):
+                if not isinstance(box_data, dict):
+                    oddt_status["entries"][box_name] = {
+                        "success": False,
+                        "scores": {},
+                        "error": "invalid box summary payload",
+                    }
+                    continue
+
+                representative_pose = Path(str(box_data.get("representative_pose", "")))
+                if not _is_valid_file(representative_pose):
+                    oddt_status["entries"][box_name] = {
+                        "success": False,
+                        "scores": {},
+                        "error": f"representative pose missing: {representative_pose}",
+                    }
+                    continue
+
+                oddt_status["entries"][box_name] = _run_oddt_api_for_pose(
+                    receptor_path=prepared_receptor,
+                    ligand_path=representative_pose,
+                    output_dir=(target_dir / box_name / "oddt_rescoring"),
+                    run_name=f"{job_name}_{box_name}",
+                    timeout_seconds=pipeline_oddt_timeout,
+                    threads_hint=threads_count,
+                )
+        else:
+            # Single-box/default mode: score one representative pose.
+            representative_pose = Path(str(summary.get("representative_pose", "")))
+            if _is_valid_file(representative_pose):
+                oddt_status["entries"]["__root__"] = _run_oddt_api_for_pose(
+                    receptor_path=prepared_receptor,
+                    ligand_path=representative_pose,
+                    output_dir=(target_dir / "oddt_rescoring"),
+                    run_name=job_name,
+                    timeout_seconds=pipeline_oddt_timeout,
+                    threads_hint=threads_count,
+                )
+            else:
+                oddt_status["entries"]["__root__"] = {
+                    "success": False,
+                    "scores": {},
+                    "error": f"representative pose missing: {representative_pose}",
+                }
+
+        oddt_status["success"] = any(
+            bool(entry.get("success", False))
+            for entry in oddt_status["entries"].values()
+            if isinstance(entry, dict)
+        )
+        oddt_status["phase"] = "completed" if oddt_status["success"] else "failed"
+        _write_json(output.oddt_status, oddt_status)
+
+
+rule run_pipeline:
+    """
+    Finalize payload/report from core summary plus dedicated ODDT status.
+    """
+    input:
+        receptor=_wc_receptor_path,
+        receptor_cache=_wc_receptor_cache_manifest_path,
+        ligand=_wc_ligand_path,
+        box=_wc_box_path,
+        engine_summaries=_engine_summary_inputs,
+        core_summary=_wc_core_summary_path,
+        oddt_status=_wc_oddt_status_path,
     output:
         payload=os.path.join(
             database_rule_root_str,
@@ -2962,62 +4026,39 @@ rule run_pipeline:
             "{target}",
             "run_report.json",
         ),
-    threads: pipeline_postprocess_threads
+    threads: 1
     resources:
         mem_mb=pipeline_postprocess_mem_mb
     run:
-        for env_name in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
-            os.environ[env_name] = str(threads)
-
         target_dir = Path(os.path.dirname(input.ligand))
         target_dir.mkdir(parents=True, exist_ok=True)
 
         job_name = f"{wildcards.database}_{wildcards.receptor}_{wildcards.kind}_{wildcards.target}"
         if not _cached_receptor_files_present(str(input.receptor)):
             _ensure_receptor_cache_ready(str(input.receptor), str(input.receptor_cache))
-        rc = _run_pipeline_postprocess_from_summaries(
-            receptor_path=str(input.receptor),
-            ligand_path=str(input.ligand),
-            box_path=str(input.box),
-            outdir_path=str(target_dir),
-            job_name=job_name,
-            engine_summary_paths=list(input.engine_summaries),
-            max_workers=int(threads),
-        )
-        if rc != 0:
-            raise RuntimeError(
-                f"OCDocker pipeline failed for {wildcards.database}/{wildcards.receptor}/{wildcards.kind}/{wildcards.target} "
-                f"with return code {rc}."
-            )
 
-        summary_path = target_dir / "summary.json"
-        summary_output_path: Optional[Path] = None
-        per_box_summary_paths: List[Path] = []
-        if summary_path.exists():
-            with summary_path.open("r", encoding="utf-8") as handle:
-                summary = json.load(handle)
-            summary_output_path = summary_path
-        elif pipeline_all_boxes:
-            per_box_summary = {}
-            for box_summary_path in sorted(target_dir.glob("box*/summary.json")):
-                per_box_summary_paths.append(box_summary_path)
-                with box_summary_path.open("r", encoding="utf-8") as handle:
-                    per_box_summary[box_summary_path.parent.name] = json.load(handle)
+        with Path(str(input.core_summary)).open("r", encoding="utf-8") as handle:
+            core_payload = json.load(handle)
+        summary = core_payload.get("summary", {})
+        if not isinstance(summary, dict):
+            raise RuntimeError(f"Invalid core summary payload at {input.core_summary}")
 
-            if not per_box_summary:
-                raise RuntimeError(
-                    "Pipeline output missing summary.json and no per-box summaries were found under "
-                    f"{target_dir}."
-                )
+        summary_output_path_raw = str(core_payload.get("summary_output_path", "") or "").strip()
+        summary_output_path: Optional[Path] = Path(summary_output_path_raw) if summary_output_path_raw else None
+        per_box_summary_paths = [Path(str(path)) for path in core_payload.get("per_box_summary_paths", []) if str(path).strip()]
 
-            summary = {
-                "job": job_name,
-                "pipeline_version": pipeline_version,
-                "all_boxes": True,
-                "box_summaries": per_box_summary,
-            }
-        else:
-            raise RuntimeError(f"Pipeline output missing summary.json at: {summary_path}")
+        oddt_status: Dict[str, Any] = {}
+        oddt_status_path = Path(str(input.oddt_status))
+        if oddt_status_path.is_file():
+            with oddt_status_path.open("r", encoding="utf-8") as handle:
+                loaded_status = json.load(handle)
+            if isinstance(loaded_status, dict):
+                oddt_status = loaded_status
+        # Merge ODDT scores/status into the summary generated in core stage.
+        summary = _apply_oddt_status_to_summary(summary, oddt_status)
+
+        if summary_output_path is not None:
+            _write_json(summary_output_path, summary)
 
         representative_pose = summary.get("representative_pose")
         representative_engine = summary.get("representative_engine")
@@ -3071,6 +4112,27 @@ rule run_pipeline:
         report_path.write_text(json.dumps(run_report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
+rule export_database_csv:
+    """
+    Export one consolidated CSV for each selected database alias.
+    """
+    input:
+        payloads=lambda wildcards: _payload_targets_for_database(wildcards.database),
+    output:
+        csv=os.path.join(
+            database_rule_root_str,
+            "{database}",
+            "pipeline_results.csv",
+        ),
+    threads: 1
+    run:
+        _write_database_results_csv(
+            database=wildcards.database,
+            payload_paths=list(input.payloads),
+            csv_path=str(output.csv),
+        )
+
+
 rule all:
     """
     Execute OCDocker pipeline over selected databases and kinds.
@@ -3080,6 +4142,10 @@ rule all:
     """
     default_target: True
     input:
-        allkinds=collect_payload_targets(),
+        allkinds=all_payload_targets,
+        database_csvs=_collect_database_csv_targets(),
     run:
-        print(f"All done! Processed {len(input.allkinds)} entries.")
+        print(
+            f"All done! Processed {len(input.allkinds)} entries. "
+            f"Database CSV exports: {len(input.database_csvs)}"
+        )

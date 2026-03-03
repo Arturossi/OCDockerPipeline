@@ -12,8 +12,9 @@ For each `{database}/{receptor}/compounds/{kind}/{target}` entry, the workflow:
 1. Validates and caches receptor preparation (`prepare_receptor_cache`).
 2. Prepares and caches ligand artifacts shared across engines (`prepare_ligand_cache`).
 3. Runs one independent `run_engine` job per selected docking engine (`vina`, `gnina`, `plants`).
-4. Aggregates in `run_pipeline`, performs clustering/rescoring, and optionally writes DB rows.
-5. Writes `summary.json`, `payload.pkl`, and `run_report.json`.
+4. Aggregates in `run_pipeline_core`, performs clustering and non-ODDT rescoring.
+5. Runs ODDT through OCDocker API in dedicated rule `run_oddt` (isolated timeout/failure handling).
+6. Finalizes in `run_pipeline` and writes `summary.json`, `payload.pkl`, `run_report.json`, and per-database `pipeline_results.csv`.
 
 Outputs are addressed under `<ocdb>/<alias>/...`; for custom path sources, that alias is mounted to the external directory.
 
@@ -52,12 +53,19 @@ Core keys:
 - `pipeline_engines`: optional explicit docking engines (`vina`, `gnina`, `plants` only).
 - `pipeline_rescoring_engines`: optional rescoring engine list (all supported rescoring engines are always included).
 - `pipeline_store_db`: enable/disable DB writes.
+- `pipeline_store_db_mid_execution`: persist per-engine progress snapshots to `pipelineruns` during `run_engine`.
+- `pipeline_export_database_csv`: export one consolidated CSV per database alias at DAG end.
 - `pipeline_cluster_min`, `pipeline_cluster_max`, `pipeline_cluster_step`.
 - `pipeline_all_boxes`: when `true`, process all `box*.pdb` files for each target.
 - `pipeline_discovery_cache`: cache target discovery metadata in `.snakemake/` (enabled by default).
 - `pipeline_timeout`: optional timeout propagated to OCDocker API calls.
 - `pipeline_engine_threads*`, `pipeline_engine_mem_mb*`: per-engine resource settings.
+- `pipeline_engine_gpu*`: per-engine GPU slot requirements (for scheduler constraints).
+- `pipeline_engine_priority*`: per-engine scheduling priority (higher runs first).
+- `pipeline_engine_max_parallel`: optional per-engine concurrent job caps.
+- `pipeline_total_gpus`: global GPU pool used by Snakemake scheduling.
 - `pipeline_postprocess_threads`, `pipeline_postprocess_mem_mb`: post-processing resources.
+- `pipeline_oddt_threads`, `pipeline_oddt_mem_mb`, `pipeline_oddt_timeout`: dedicated ODDT rule resources/timeout.
 - `pipeline_report_include_python_packages`: include full installed package list in `run_report.json`.
 
 Behavior:
@@ -117,9 +125,12 @@ DAG per target:
 - `prepare_receptor_cache`
 - `prepare_ligand_cache`
 - `run_engine[...]` (one job per selected engine)
-- `run_pipeline` (fan-in from `engine_status/*.json`)
+- `run_pipeline_core` (fan-in from `engine_status/*.json`)
+- `run_oddt` (ODDT API rescoring)
+- `run_pipeline` (final payload/report aggregation)
 
 Because engines are independent jobs, they can run concurrently when `--cores` allows.
+Use `pipeline_engine_priority` and `pipeline_engine_max_parallel` to keep mixed-engine packing (for example, avoid flooding with only Vina jobs while Gnina is ready).
 When `pipeline_all_boxes: true`, each `run_engine`/`run_pipeline` job can also fan out across boxes up to the rule `threads` value.
 
 ## Run
@@ -211,10 +222,15 @@ Per target (`<database_root>/<receptor>/compounds/<kind>/<target>/`):
 - `payload.pkl`: main target artifact used by Snakemake rules.
 - `run_report.json`: reproducibility report for the target.
 
+Per database (`<database_root>/`):
+
+- `pipeline_results.csv`: consolidated table with one row per processed target, including core metadata, flattened rescoring scores, and JSON payload columns.
+
 When `pipeline_store_db: true`, DB persistence includes:
 
 - `complexes`: receptor/ligand links plus mapped numeric rescoring columns.
 - `pipelineruns`: selected representative pose, representative engine, full rescoring JSON payload, and post-processing summary JSON.
+- `pipelineruns` progress rows (when `pipeline_store_db_mid_execution: true`): per-engine snapshots keyed as `<job>__progress__<engine>`.
 
 ## Reproducibility Report
 

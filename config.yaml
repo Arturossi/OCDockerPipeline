@@ -46,6 +46,12 @@ enable_legacy_database_rules: false
 # and runs all configured scoring functions for each engine.
 # pipeline_rescoring_engines: ["vina", "smina", "gnina", "plants", "oddt"]
 pipeline_store_db: true
+# Store per-engine progress snapshots in PostgreSQL during `run_engine`
+# (rows are written to `pipelineruns` using `<job>__progress__<engine>` names).
+pipeline_store_db_mid_execution: true
+# Export one consolidated CSV per selected database alias at the end of the DAG
+# (written as `<ocdb>/<database>/pipeline_results.csv`).
+pipeline_export_database_csv: true
 # Include full installed Python package list in run_report.json.
 # Keep false for large production runs unless you explicitly need package-level provenance.
 pipeline_report_include_python_packages: false
@@ -67,9 +73,42 @@ pipeline_engine_mem_mb:
   plants: 3000
   vina: 2000
 
+# GPU scheduling for docking jobs.
+# By default Gnina consumes 1 GPU slot; Vina/PLANTS consume 0.
+# You can disable GPU accounting by setting both values to 0.
+pipeline_engine_gpu_default: 0
+pipeline_engine_gpu:
+  gnina: 1
+
+# Global GPU pool for Snakemake scheduler.
+# This is applied automatically in the snakefile via workflow.global_resources["gpu"].
+pipeline_total_gpus: 1
+
+# Optional engine priorities (higher runs first when ready).
+# This helps prevent GNINA starvation when many CPU-only jobs are queued.
+pipeline_engine_priority_default: 50
+pipeline_engine_priority:
+  gnina: 100
+  plants: 60
+  vina: 50
+
+# Optional per-engine parallel caps (max concurrent jobs per engine).
+# Suggested values below fit the current mem profile exactly:
+#   6*vina(2GB) + 3*plants(3GB) + 1*gnina(7GB) = 28GB
+pipeline_engine_max_parallel:
+  vina: 6
+  plants: 3
+  gnina: 1
+
 # Post-processing scheduling (`run_pipeline`)
 pipeline_postprocess_threads: 2
 pipeline_postprocess_mem_mb: 6000
+
+# Dedicated ODDT rule scheduling (`run_oddt`)
+pipeline_oddt_threads: 1
+pipeline_oddt_mem_mb: 4000
+# Timeout in seconds for ODDT API rescoring per target (0 disables timeout)
+pipeline_oddt_timeout: 1800
 
 pipeline_cluster_min: 10.0
 pipeline_cluster_max: 20.0
