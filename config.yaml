@@ -78,11 +78,11 @@ pipeline_engine_mem_mb:
 # You can disable GPU accounting by setting both values to 0.
 pipeline_engine_gpu_default: 0
 pipeline_engine_gpu:
-  gnina: 1
+  gnina: 0
 
 # Global GPU pool for Snakemake scheduler.
 # This is applied automatically in the snakefile via workflow.global_resources["gpu"].
-pipeline_total_gpus: 1
+pipeline_total_gpus: 0
 
 # Optional engine priorities (higher runs first when ready).
 # This helps prevent GNINA starvation when many CPU-only jobs are queued.
@@ -98,7 +98,7 @@ pipeline_engine_priority:
 pipeline_engine_max_parallel:
   vina: 6
   plants: 3
-  gnina: 1
+  gnina: 4
 
 # Post-processing scheduling (`run_pipeline`)
 pipeline_postprocess_threads: 2
