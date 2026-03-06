@@ -155,6 +155,32 @@ snakemake -s snakefile --cores 16 --resources mem_mb=28000 --use-conda --conda-f
 
 Why `--resources mem_mb=28000`: rule-level `mem_mb` limits are enforced only when a global resource budget is provided.
 
+### Target Batching (Large DAGs / Testing)
+
+For very large datasets, run batches using native Snakemake `--batch all=N/M`.
+Use the helper script to avoid manual looping and repeated CLI editing.
+
+Batch runner script:
+
+```bash
+# Tiny test: one small batch (approximately 5 targets)
+scripts/run_target_batches.sh --batch-size 5 --from 1 --to 1 -- \
+  --cores 8 --resources mem_mb=12000 --keep-going
+```
+
+```bash
+# Production-style fractional batching (20 partitions)
+scripts/run_target_batches.sh --total-batches 20 --from 1 --to 20 -- \
+  --cores 16 --resources mem_mb=28000 --keep-going
+```
+
+Notes:
+
+- No extra config file is required.
+- Base `config.yaml` does not need batch keys.
+- `--batch-size` mode converts target count to `all=N/M` using `.snakemake/target_discovery_cache.json` (or `--total-targets` if provided).
+- The helper disables `pipeline_export_database_csv` during batch runs to avoid all-target fan-in on every partition.
+
 Monitoring with snkmt:
 
 ```bash

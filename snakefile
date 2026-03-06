@@ -109,6 +109,8 @@ _db_tables_initialized = False
 _db_tables_init_lock = threading.Lock()
 _db_write_lock = threading.Lock()
 _PIPELINE_DB_SCHEMA_VERSION = "2026-02-27.pipeline-runs-v1"
+_TARGET_DISCOVERY_CACHE_SCHEMA_VERSION = 3
+_REFERENCE_LIGAND_FILENAMES = ("reference_ligand.pdb", "reference_ligand.sdf")
 
 
 def _as_bool(value: Any, default: bool = False) -> bool:
@@ -1799,6 +1801,130 @@ def _box_path(database: str, receptor: str, kind: str, target: str) -> Path:
     return _target_dir_path(database, receptor, kind, target) / "boxes" / "box0.pdb"
 
 
+def _reference_ligand_paths(database: str, receptor: str) -> List[Path]:
+    """Return receptor-level reference ligand candidate paths for one entry."""
+
+    receptor_root = _database_rule_root_path(database) / receptor
+    return [receptor_root / name for name in _REFERENCE_LIGAND_FILENAMES]
+
+
+def _resolve_reference_ligand_path(database: str, receptor: str) -> Optional[Path]:
+    """Return first valid receptor-level reference ligand path, if available."""
+
+    for candidate in _reference_ligand_paths(database, receptor):
+        if _is_valid_file(candidate):
+            return candidate
+    return None
+
+
+def _ensure_target_box_from_reference_ligand(
+    *,
+    database: str,
+    receptor: str,
+    kind: str,
+    target: str,
+    ligand_path: Union[str, Path],
+    box_path: Union[str, Path],
+) -> None:
+    """Ensure ``boxes/box0.pdb`` exists, generating it from reference-ligand centroid when missing."""
+
+    import OCDocker.Ligand as ocl
+
+    ligand_path = Path(ligand_path).resolve()
+    box_path = Path(box_path).resolve()
+    if _is_valid_file(box_path):
+        return
+
+    # Remove stale zero-byte artifacts before creating a fresh box.
+    if box_path.is_file():
+        try:
+            if box_path.stat().st_size <= 0:
+                box_path.unlink()
+        except OSError:
+            pass
+
+    reference_ligand_raw = _resolve_reference_ligand_path(database, receptor)
+    if reference_ligand_raw is None:
+        expected_names = ", ".join(_REFERENCE_LIGAND_FILENAMES)
+        receptor_root = _database_rule_root_path(database) / receptor
+        raise RuntimeError(
+            f"Missing docking box at '{box_path}' and missing reference ligand under '{receptor_root}'. "
+            f"Expected one of: {expected_names}. Provide boxes/box0.pdb or a reference ligand file."
+        )
+    reference_ligand = reference_ligand_raw.resolve()
+
+    centroid: Optional[Tuple[float, float, float]] = None
+    centroid_error: Optional[Exception] = None
+    for sanitize in (True, False):
+        try:
+            centroid_raw = ocl.get_centroid(str(reference_ligand), sanitize=sanitize)
+        except Exception as exc:
+            centroid_error = exc
+            continue
+
+        if centroid_raw is None:
+            continue
+
+        if hasattr(centroid_raw, "x") and hasattr(centroid_raw, "y") and hasattr(centroid_raw, "z"):
+            centroid = (float(centroid_raw.x), float(centroid_raw.y), float(centroid_raw.z))
+        else:
+            try:
+                centroid_values = tuple(float(value) for value in centroid_raw)
+            except Exception:
+                centroid = None
+                continue
+            if len(centroid_values) == 3:
+                centroid = (
+                    float(centroid_values[0]),
+                    float(centroid_values[1]),
+                    float(centroid_values[2]),
+                )
+
+        if centroid is not None:
+            break
+
+    if centroid is None:
+        error_suffix = f" Last error: {centroid_error}" if centroid_error is not None else ""
+        raise RuntimeError(
+            f"Failed to compute centroid from reference ligand '{reference_ligand}'.{error_suffix}"
+        )
+
+    ligand_obj = None
+    ligand_error: Optional[Exception] = None
+    ligand_name = f"{database}_{receptor}_{kind}_{target}"
+    for sanitize in (True, False):
+        try:
+            ligand_obj = ocl.Ligand(str(ligand_path), name=ligand_name, sanitize=sanitize)
+            break
+        except Exception as exc:
+            ligand_error = exc
+
+    if ligand_obj is None:
+        error_suffix = f" Last error: {ligand_error}" if ligand_error is not None else ""
+        raise RuntimeError(
+            f"Failed to parse candidate ligand '{ligand_path}' to infer box boundaries.{error_suffix}"
+        )
+
+    if ligand_obj.RadiusOfGyration is None:
+        raise RuntimeError(
+            f"RadiusOfGyration is unavailable for ligand '{ligand_path}'. "
+            "Cannot infer box boundaries from candidate ligand."
+        )
+
+    box_path.parent.mkdir(parents=True, exist_ok=True)
+    create_result = ligand_obj.create_box(
+        centroid=centroid,
+        save_path=str(box_path.parent),
+        overwrite=False,
+    )
+    if not _is_valid_file(box_path):
+        if create_result is None:
+            raise RuntimeError(f"Failed to generate docking box at '{box_path}'.")
+        raise RuntimeError(
+            f"Failed to generate docking box at '{box_path}' (create_box returned code {create_result})."
+        )
+
+
 def _payload_path(database: str, receptor: str, kind: str, target: str) -> Path:
     """Return final payload pickle path for one target entry."""
 
@@ -1926,6 +2052,22 @@ def _target_discovery_signature(database_to_receptors: Dict[str, List[str]]) -> 
             receptor_path = database_root / receptor / "receptor.pdb"
             receptor_exists = receptor_path.is_file()
             receptor_stat = receptor_path.stat() if receptor_exists else None
+            reference_ligand_entries: List[Dict[str, Any]] = []
+            for reference_name in _REFERENCE_LIGAND_FILENAMES:
+                reference_path = database_root / receptor / reference_name
+                reference_exists = reference_path.is_file()
+                reference_stat = reference_path.stat() if reference_exists else None
+                reference_size = int(reference_stat.st_size) if reference_stat else 0
+                reference_ligand_entries.append(
+                    {
+                        "name": reference_name,
+                        "path": str(reference_path),
+                        "exists": reference_exists,
+                        "size": reference_size,
+                        "mtime_ns": int(reference_stat.st_mtime_ns) if reference_stat else 0,
+                    }
+                )
+            has_reference_ligand = any(entry["exists"] and int(entry["size"]) > 0 for entry in reference_ligand_entries)
             receptor_entry: Dict[str, Any] = {
                 "database": database,
                 "database_root": str(database_root),
@@ -1933,6 +2075,8 @@ def _target_discovery_signature(database_to_receptors: Dict[str, List[str]]) -> 
                 "receptor_exists": receptor_exists,
                 "receptor_size": int(receptor_stat.st_size) if receptor_stat else 0,
                 "receptor_mtime_ns": int(receptor_stat.st_mtime_ns) if receptor_stat else 0,
+                "reference_ligand_exists": has_reference_ligand,
+                "reference_ligands": reference_ligand_entries,
                 "kinds": [],
             }
 
@@ -1953,7 +2097,7 @@ def _target_discovery_signature(database_to_receptors: Dict[str, List[str]]) -> 
             layout.append(receptor_entry)
 
     payload = {
-        "schema_version": 1,
+        "schema_version": _TARGET_DISCOVERY_CACHE_SCHEMA_VERSION,
         "ocdb_path": str(Path(ocdb_path).resolve()),
         "selected_databases": list(selected_databases),
         "database_roots": {database: str(_database_root_path(database)) for database in selected_databases},
@@ -1976,7 +2120,7 @@ def _load_target_discovery_cache(signature: str) -> Optional[Tuple[List[str], in
     except Exception:
         return None
 
-    if payload.get("schema_version") != 1:
+    if payload.get("schema_version") != _TARGET_DISCOVERY_CACHE_SCHEMA_VERSION:
         return None
     if payload.get("signature") != signature:
         return None
@@ -2003,7 +2147,7 @@ def _write_target_discovery_cache(signature: str, targets: List[str], scanned: i
     cache_path = _target_discovery_cache_path()
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
-        "schema_version": 1,
+        "schema_version": _TARGET_DISCOVERY_CACHE_SCHEMA_VERSION,
         "generated_at_utc": _utc_now_iso(),
         "signature": signature,
         "scanned": int(scanned),
@@ -2039,6 +2183,8 @@ def collect_payload_targets():
             receptor_path = _source_receptor_path(database, receptor)
             if not _is_valid_file(receptor_path):
                 continue
+            reference_ligand_path = _resolve_reference_ligand_path(database, receptor)
+            has_reference_ligand = reference_ligand_path is not None
 
             compounds_dir = _database_root_path(database) / receptor / "compounds"
             if not compounds_dir.is_dir():
@@ -2053,7 +2199,8 @@ def collect_payload_targets():
                     scanned += 1
                     ligand_path = target_dir / "ligand.smi"
                     box_path = target_dir / "boxes" / "box0.pdb"
-                    if not _is_valid_file(ligand_path) or not _is_valid_file(box_path):
+                    has_box = _is_valid_file(box_path)
+                    if not _is_valid_file(ligand_path) or (not has_box and not has_reference_ligand):
                         continue
 
                     targets.append(
@@ -2064,7 +2211,8 @@ def collect_payload_targets():
     if not unique_targets:
         raise RuntimeError(
             "No valid targets found to process. "
-            "Checked selected databases/kinds and required files: receptor.pdb, ligand.smi, boxes/box0.pdb."
+            "Checked selected databases/kinds and required files: receptor.pdb, ligand.smi, "
+            "and either boxes/box0.pdb or reference_ligand.pdb/.sdf."
         )
 
     if pipeline_discovery_cache:
@@ -3612,6 +3760,39 @@ rule prepare_receptor_cache:
     threads: 1
     run:
         _ensure_receptor_cache_ready(str(input.receptor), str(output.cache))
+
+
+rule prepare_target_box:
+    """
+    Ensure per-target default docking box exists.
+
+    When ``boxes/box0.pdb`` is missing, infer a new box using:
+    - centroid from receptor-level ``reference_ligand.pdb``/``reference_ligand.sdf``
+    - box size from candidate ligand ``RadiusOfGyration``
+    """
+    input:
+        ligand=_wc_ligand_path,
+    output:
+        box=os.path.join(
+            database_rule_root_str,
+            "{database}",
+            "{receptor}",
+            "compounds",
+            "{kind}",
+            "{target}",
+            "boxes",
+            "box0.pdb",
+        ),
+    threads: 1
+    run:
+        _ensure_target_box_from_reference_ligand(
+            database=wildcards.database,
+            receptor=wildcards.receptor,
+            kind=wildcards.kind,
+            target=wildcards.target,
+            ligand_path=str(input.ligand),
+            box_path=str(output.box),
+        )
 
 
 rule prepare_ligand_cache:
