@@ -226,13 +226,10 @@ for (( idx=from_idx; idx<=to_idx; idx++ )); do
     echo
     echo "=== Running batch ${idx} (${batch_spec}) ($(date '+%Y-%m-%d %H:%M:%S')) ==="
 
-    # Disable per-database CSV export in batch runs to avoid all-target fan-in
-    # dependencies being reintroduced for each partition.
     declare -a cmd=(
         "${snakemake_cmd[@]}"
         -s "$snakefile"
         --batch "$batch_spec"
-        --config "pipeline_export_database_csv=false"
     )
     if (( dry_run )); then
         cmd+=(-n)
@@ -240,6 +237,10 @@ for (( idx=from_idx; idx<=to_idx; idx++ )); do
     if [[ ${#extra_args[@]} -gt 0 ]]; then
         cmd+=("${extra_args[@]}")
     fi
+    # Disable per-database CSV export in batch runs to avoid all-target fan-in
+    # dependencies being reintroduced for each partition. Append it last so a
+    # user-provided --config cannot re-enable CSV export accidentally.
+    cmd+=(--config "pipeline_export_database_csv=false")
 
     if ! "${cmd[@]}"; then
         echo "Batch ${idx} failed. Stopping." >&2
