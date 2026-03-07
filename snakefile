@@ -2413,12 +2413,6 @@ def _configured_score_columns_for_csv() -> List[str]:
         for scoring_function in engine_to_functions.get(engine, []):
             _add(_config_score_column_for_csv(engine, str(scoring_function)))
 
-    # Gnina CNN outputs are collapsed to one stable key by _canonicalize_rescore_key.
-    gnina_cfg = getattr(oc_config, "gnina", None)
-    gnina_cnn_models = list(getattr(gnina_cfg, "cnn_models", []) or []) if gnina_cfg else []
-    if gnina_cnn_models:
-        _add("gnina_default")
-
     return ordered
 
 
@@ -2520,6 +2514,8 @@ def _write_database_results_csv(database: str, payload_paths: List[str], csv_pat
 
         return {}
 
+    excluded_score_columns = {"gnina_default"}
+
     rows: List[Dict[str, Any]] = []
     score_columns: Set[str] = set()
     for payload_path in sorted(set(payload_paths)):
@@ -2588,6 +2584,8 @@ def _write_database_results_csv(database: str, payload_paths: List[str], csv_pat
 
         flattened_scores = _flatten_summary_rescoring_for_csv(summary)
         for score_key, score_value in flattened_scores.items():
+            if score_key in excluded_score_columns:
+                continue
             row[score_key] = score_value
             score_columns.add(score_key)
 
@@ -2601,7 +2599,9 @@ def _write_database_results_csv(database: str, payload_paths: List[str], csv_pat
         "name",
     ]
 
-    configured_score_columns = _configured_score_columns_for_csv()
+    configured_score_columns = [
+        score for score in _configured_score_columns_for_csv() if score not in excluded_score_columns
+    ]
     configured_score_set = set(configured_score_columns)
     ordered_score_columns = configured_score_columns + sorted(
         score for score in score_columns if score not in configured_score_set
