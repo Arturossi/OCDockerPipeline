@@ -651,14 +651,36 @@ def _to_numeric(value: Any) -> Optional[float]:
     return numeric_value
 
 
+def _descriptor_attribute_candidates(descriptor: str) -> List[str]:
+    """Return likely attribute names for one descriptor key."""
+
+    base = descriptor.strip()
+    if not base:
+        return []
+
+    candidates: List[str] = [base]
+    lower_first = base[0].lower() + base[1:]
+    for candidate in (lower_first, base.lower()):
+        if candidate not in candidates:
+            candidates.append(candidate)
+    return candidates
+
+
 def _collect_numeric_descriptors(obj: Any, descriptor_names: List[str]) -> Dict[str, Union[int, float]]:
     """Extract selected numeric descriptors from an object attribute set."""
 
     payload: Dict[str, Union[int, float]] = {}
     for descriptor in descriptor_names:
-        if not hasattr(obj, descriptor):
+        raw_value: Any = None
+        found = False
+        for attr_name in _descriptor_attribute_candidates(descriptor):
+            if hasattr(obj, attr_name):
+                raw_value = getattr(obj, attr_name)
+                found = True
+                break
+        if not found:
             continue
-        numeric_value = _to_numeric(getattr(obj, descriptor))
+        numeric_value = _to_numeric(raw_value)
         if numeric_value is None:
             continue
         if _is_integer_descriptor_name(descriptor):
@@ -978,6 +1000,7 @@ def _store_engine_progress_in_db(
 def _canonicalize_rescore_key(engine: str, raw_key: str) -> str:
     """Normalize rescoring keys to a canonical ``engine_metric`` form."""
 
+    engine_key = str(engine).strip().lower()
     key = str(raw_key).strip().lower().replace("-", "_").replace(" ", "_")
     while "__" in key:
         key = key.replace("__", "_")
@@ -985,17 +1008,34 @@ def _canonicalize_rescore_key(engine: str, raw_key: str) -> str:
     if key.endswith("_rescoring"):
         key = key[: -len("_rescoring")]
 
-    if key.startswith(f"{engine}_"):
-        return key
+    if key.startswith(f"{engine_key}_"):
+        canonical = key
+    elif key.startswith("rescoring_"):
+        rescoring_key = key[len("rescoring_"):]
+        rescoring_key = re.sub(r"_\d+$", "", rescoring_key)
+        canonical = f"{engine_key}_{rescoring_key}" if rescoring_key else f"{engine_key}_{key}"
+    else:
+        canonical = f"{engine_key}_{key}"
 
-    if key.startswith("rescoring_"):
-        parts = key.split("_")
-        if len(parts) >= 2:
-            if len(parts) >= 3 and parts[1] == "cnn":
-                return f"{engine}_cnn_{parts[2]}"
-            return f"{engine}_{parts[1]}"
+    # Collapse legacy/new Gnina aliases so CSV columns stay stable across runs.
+    if engine_key == "gnina":
+        if canonical in {"gnina_ad4", "gnina_scoring_ad4"}:
+            return "gnina_ad4_scoring"
+        if canonical in {"gnina_dkoes", "gnina_scoring_dkoes"}:
+            return "gnina_dkoes_scoring"
+        if canonical.startswith("gnina_cnn_"):
+            return "gnina_default"
+    elif engine_key == "smina":
+        if canonical in {"smina_ad4", "smina_scoring_ad4"}:
+            return "smina_ad4_scoring"
+        if canonical in {"smina_dkoes", "smina_scoring_dkoes"}:
+            return "smina_dkoes_scoring"
+        if canonical in {"smina_old_scoring_dkoes"}:
+            return "smina_dkoes_scoring_old"
+        if canonical in {"smina_fast_dkoes"}:
+            return "smina_dkoes_fast"
 
-    return f"{engine}_{key}"
+    return canonical
 
 
 def _prepare_cached_receptors_for_receptor(receptor_path):
@@ -1283,7 +1323,11 @@ def _prepare_cached_ligands_for_target(
         os.environ["OCDOCKER_TIMEOUT"] = str(pipeline_timeout)
 
     receptor_dir = receptor_path.parent
-    receptor_obj = ocr.Receptor(str(receptor_path), name=f"{job_name}_receptor")
+    receptor_obj = ocr.Receptor(
+        str(receptor_path),
+        name=f"{job_name}_receptor",
+        allow_missing_surface=True,
+    )
     ligand_obj = ocl.Ligand(str(ligand_path), name=job_name)
 
     if pipeline_requires_pdbqt:
@@ -2154,9 +2198,15 @@ def _write_target_discovery_cache(signature: str, targets: List[str], scanned: i
         "targets": sorted(set(targets)),
     }
 
-    tmp_path = cache_path.with_suffix(".tmp")
-    tmp_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    tmp_path.replace(cache_path)
+    lock_path = cache_path.with_suffix(".lock")
+    with _file_lock(lock_path):
+        # Snakemake can parse this snakefile concurrently in subprocess mode.
+        # Use a unique tmp file per writer and serialize replace() operations.
+        tmp_path = cache_path.with_name(
+            f"{cache_path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+        )
+        tmp_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        tmp_path.replace(cache_path)
 
 
 def collect_payload_targets():
@@ -2312,13 +2362,163 @@ def _flatten_summary_rescoring_for_csv(summary: Dict[str, Any]) -> Dict[str, flo
     return flattened
 
 
+def _config_score_column_for_csv(engine: str, scoring_function: str) -> Optional[str]:
+    """Map one scoring function from OCDocker.cfg into a CSV column name."""
+
+    engine_key = str(engine).strip().lower()
+    sf_key = _csv_key(scoring_function)
+    if not sf_key:
+        return None
+
+    if engine_key in {"vina", "smina", "gnina", "plants"}:
+        raw_key = f"{engine_key}_{sf_key}"
+        return _csv_key(_canonicalize_rescore_key(engine_key, raw_key))
+
+    if engine_key == "oddt":
+        if sf_key.startswith("rfscore_v1"):
+            return "oddt_rfscore_v1"
+        if sf_key.startswith("rfscore_v2"):
+            return "oddt_rfscore_v2"
+        if sf_key.startswith("rfscore_v3"):
+            return "oddt_rfscore_v3"
+        if sf_key.startswith("nnscore"):
+            return "oddt_nnscore"
+        if sf_key.startswith("plecrf"):
+            return "oddt_plecrf_p5_l1_s65536"
+        return f"oddt_{sf_key}"
+
+    return None
+
+
+def _configured_score_columns_for_csv() -> List[str]:
+    """Return score columns ordered by scoring_functions in OCDocker.cfg."""
+
+    ordered: List[str] = []
+
+    def _add(column: Optional[str]) -> None:
+        if not column:
+            return
+        if column not in ordered:
+            ordered.append(column)
+
+    engine_to_functions = {
+        "vina": list(getattr(getattr(oc_config, "vina", None), "scoring_functions", []) or []),
+        "smina": list(getattr(getattr(oc_config, "smina", None), "scoring_functions", []) or []),
+        "gnina": list(getattr(getattr(oc_config, "gnina", None), "scoring_functions", []) or []),
+        "plants": list(getattr(getattr(oc_config, "plants", None), "scoring_functions", []) or []),
+        "oddt": list(getattr(getattr(oc_config, "oddt", None), "scoring_functions", []) or []),
+    }
+
+    for engine in ("vina", "smina", "gnina", "plants", "oddt"):
+        for scoring_function in engine_to_functions.get(engine, []):
+            _add(_config_score_column_for_csv(engine, str(scoring_function)))
+
+    # Gnina CNN outputs are collapsed to one stable key by _canonicalize_rescore_key.
+    gnina_cfg = getattr(oc_config, "gnina", None)
+    gnina_cnn_models = list(getattr(gnina_cfg, "cnn_models", []) or []) if gnina_cfg else []
+    if gnina_cnn_models:
+        _add("gnina_default")
+
+    return ordered
+
+
 def _write_database_results_csv(database: str, payload_paths: List[str], csv_path: Union[str, Path]) -> None:
-    """Write a consolidated per-database CSV from target payload pickles."""
+    """Write a consolidated per-database CSV from target payloads and summaries."""
 
     import csv
 
     output_path = Path(csv_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    receptor_descriptor_names: List[str] = []
+    ligand_descriptor_names: List[str] = []
+    receptor_module = None
+    ligand_module = None
+    try:
+        import OCDocker.Receptor as ocr
+        import OCDocker.Ligand as ocl
+
+        receptor_module = ocr
+        ligand_module = ocl
+        receptor_descriptor_names = list(getattr(ocr.Receptor, "allDescriptors", []))
+        ligand_descriptor_names = list(getattr(ocl.Ligand, "allDescriptors", []))
+    except Exception as exc:
+        print(
+            "Warning: failed to import receptor/ligand descriptor modules for CSV export: "
+            f"{type(exc).__name__}: {exc}"
+        )
+
+    receptor_descriptor_columns = [f"receptor_{name}" for name in receptor_descriptor_names]
+    ligand_descriptor_columns = [f"ligand_{name}" for name in ligand_descriptor_names]
+
+    receptor_descriptor_cache: Dict[str, Dict[str, Union[int, float]]] = {}
+    ligand_descriptor_cache: Dict[str, Dict[str, Union[int, float]]] = {}
+
+    def _load_receptor_descriptors(receptor_path: Path, receptor_name: str) -> Dict[str, Union[int, float]]:
+        cache_key = str(receptor_path.resolve())
+        if cache_key in receptor_descriptor_cache:
+            return receptor_descriptor_cache[cache_key]
+
+        if receptor_module is None or not receptor_path.is_file():
+            receptor_descriptor_cache[cache_key] = {}
+            return receptor_descriptor_cache[cache_key]
+
+        descriptor_json = receptor_path.with_name("receptor_descriptors.json")
+        kwargs: Dict[str, Any] = {
+            "name": f"{receptor_name}_csv_receptor",
+            "allow_missing_surface": True,
+        }
+        if descriptor_json.is_file():
+            kwargs["from_json_descriptors"] = str(descriptor_json)
+
+        try:
+            receptor_obj = receptor_module.Receptor(str(receptor_path), **kwargs)
+            payload = _collect_numeric_descriptors(receptor_obj, receptor_descriptor_names)
+        except Exception as exc:
+            print(
+                f"Warning: failed to compute receptor descriptors for '{receptor_path}': "
+                f"{type(exc).__name__}: {exc}"
+            )
+            payload = {}
+
+        receptor_descriptor_cache[cache_key] = payload
+        return payload
+
+    def _load_ligand_descriptors(ligand_paths: List[Path], target_name: str) -> Dict[str, Union[int, float]]:
+        if ligand_module is None:
+            return {}
+
+        for ligand_path in ligand_paths:
+            if not ligand_path.is_file():
+                continue
+
+            cache_key = str(ligand_path.resolve())
+            if cache_key in ligand_descriptor_cache:
+                cached = ligand_descriptor_cache[cache_key]
+                if cached:
+                    return cached
+                continue
+
+            descriptor_json = ligand_path.parent / "ligand_descriptors.json"
+            kwargs: Dict[str, Any] = {"name": f"{target_name}_csv_ligand"}
+            if descriptor_json.is_file():
+                kwargs["from_json_descriptors"] = str(descriptor_json)
+
+            try:
+                ligand_obj = ligand_module.Ligand(str(ligand_path), **kwargs)
+                payload = _collect_numeric_descriptors(ligand_obj, ligand_descriptor_names)
+            except Exception as exc:
+                print(
+                    f"Warning: failed to compute ligand descriptors for '{ligand_path}': "
+                    f"{type(exc).__name__}: {exc}"
+                )
+                payload = {}
+
+            ligand_descriptor_cache[cache_key] = payload
+            if payload:
+                return payload
+
+        return {}
 
     rows: List[Dict[str, Any]] = []
     score_columns: Set[str] = set()
@@ -2331,38 +2531,60 @@ def _write_database_results_csv(database: str, payload_paths: List[str], csv_pat
             with payload_file.open("rb") as handle:
                 payload = pickle.load(handle)
         except Exception as exc:
-            rows.append(
-                {
-                    "database": database,
-                    "payload_path": str(payload_file),
-                    "error": f"failed to read payload: {type(exc).__name__}: {exc}",
-                }
+            print(
+                f"Warning: failed to read payload '{payload_file}' during CSV export: "
+                f"{type(exc).__name__}: {exc}"
             )
             continue
 
+        if not isinstance(payload, dict):
+            continue
+
+        target_dir = payload_file.parent
+        summary_path = target_dir / "summary.json"
         summary = payload.get("summary", {})
         if not isinstance(summary, dict):
             summary = {}
 
+        # Prefer on-disk summary when present (payload can be stale after partial reruns).
+        if summary_path.is_file():
+            try:
+                loaded_summary = json.loads(summary_path.read_text(encoding="utf-8"))
+                if isinstance(loaded_summary, dict):
+                    summary = loaded_summary
+            except Exception as exc:
+                print(
+                    f"Warning: failed to parse summary '{summary_path}' during CSV export: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+
+        receptor_name = str(payload.get("receptor", ""))
+        target_name = str(payload.get("target", ""))
+        receptor_path = target_dir.parents[2] / "receptor.pdb"
+        ligand_mol2 = target_dir / "ligand.mol2"
+        ligand_smi = target_dir / "ligand.smi"
+        prepared_ligand_mol2 = target_dir / "prepared_ligand.mol2"
+        ligand_candidates: List[Path] = []
+        for candidate in (ligand_mol2, ligand_smi, prepared_ligand_mol2):
+            if candidate.is_file() and candidate not in ligand_candidates:
+                ligand_candidates.append(candidate)
+
+        receptor_descriptors = _load_receptor_descriptors(receptor_path, receptor_name)
+        ligand_descriptors = _load_ligand_descriptors(ligand_candidates, target_name)
+
         row: Dict[str, Any] = {
             "database": str(payload.get("database", database)),
-            "receptor": str(payload.get("receptor", "")),
+            "receptor": receptor_name,
             "kind": str(payload.get("kind", "")),
-            "target": str(payload.get("target", "")),
+            "target": target_name,
             "name": str(payload.get("name", "")),
-            "pipeline_version": str(payload.get("pipeline_version", pipeline_version)),
-            "representative_pose": _csv_scalar(payload.get("representative_pose")),
-            "representative_engine": _csv_scalar(payload.get("representative_engine")),
-            "payload_path": str(payload_file),
-            "summary_path": str(payload_file.parent / "summary.json"),
-            "run_report_path": _csv_scalar(payload.get("run_report")),
-            "clustering_total_poses": _csv_scalar(summary.get("clustering", {}).get("total_poses") if isinstance(summary.get("clustering"), dict) else None),
-            "clustering_representative_selection": _csv_scalar(summary.get("clustering", {}).get("representative_selection") if isinstance(summary.get("clustering"), dict) else None),
-            "all_boxes": _csv_scalar(summary.get("all_boxes", False)),
-            "rescoring_json": json.dumps(_to_jsonable(summary.get("rescoring", {})), sort_keys=True),
-            "summary_json": json.dumps(_to_jsonable(summary), sort_keys=True),
-            "error": "",
         }
+
+        for descriptor_name in receptor_descriptor_names:
+            row[f"receptor_{descriptor_name}"] = receptor_descriptors.get(descriptor_name)
+
+        for descriptor_name in ligand_descriptor_names:
+            row[f"ligand_{descriptor_name}"] = ligand_descriptors.get(descriptor_name)
 
         flattened_scores = _flatten_summary_rescoring_for_csv(summary)
         for score_key, score_value in flattened_scores.items():
@@ -2377,22 +2599,14 @@ def _write_database_results_csv(database: str, payload_paths: List[str], csv_pat
         "kind",
         "target",
         "name",
-        "pipeline_version",
-        "representative_pose",
-        "representative_engine",
-        "payload_path",
-        "summary_path",
-        "run_report_path",
-        "clustering_total_poses",
-        "clustering_representative_selection",
-        "all_boxes",
     ]
-    trailing_columns = [
-        "rescoring_json",
-        "summary_json",
-        "error",
-    ]
-    fieldnames = base_columns + sorted(score_columns) + trailing_columns
+
+    configured_score_columns = _configured_score_columns_for_csv()
+    configured_score_set = set(configured_score_columns)
+    ordered_score_columns = configured_score_columns + sorted(
+        score for score in score_columns if score not in configured_score_set
+    )
+    fieldnames = base_columns + receptor_descriptor_columns + ligand_descriptor_columns + ordered_score_columns
 
     with output_path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore")
@@ -3030,6 +3244,16 @@ def _run_single_engine_for_box(
             result["error"] = f"ligand preparation failed for {engine}"
             return result
 
+        if engine == "plants":
+            # Reruns can leave stale PLANTS work directories; clear them to avoid
+            # "[Errno 39] Directory not empty" failures on restart.
+            plants_run_dir = engine_dir / "run"
+            if plants_run_dir.exists():
+                try:
+                    shutil.rmtree(plants_run_dir)
+                except OSError:
+                    pass
+
         dock_rc = _normalize_exit_code(runner.run_docking())
         if dock_rc != 0:
             result["error"] = f"docking failed with code {dock_rc}"
@@ -3144,7 +3368,11 @@ def _run_single_engine_via_api(
         results_by_box: Dict[str, Dict[str, Any]] = {}
 
         def _run_box_isolated(box: Path) -> Tuple[str, Dict[str, Any]]:
-            isolated_receptor = ocr.Receptor(str(receptor_path), name=f"{job_name}_receptor")
+            isolated_receptor = ocr.Receptor(
+                str(receptor_path),
+                name=f"{job_name}_receptor",
+                allow_missing_surface=True,
+            )
             isolated_ligand = ocl.Ligand(str(ligand_path), name=ligand_name)
             return _run_box(box, isolated_receptor, isolated_ligand)
 
@@ -3389,46 +3617,79 @@ def _postprocess_pipeline_box(
                 continue
         try:
             log_paths = ocvina.get_rescore_log_paths(ctx["vina"]["dir"])
-            raw_scores = ocvina.read_rescore_logs(log_paths, onlyBest=True) if log_paths else {}
+            raw_scores = ocvina.read_rescore_logs(log_paths, onlyBest=False) if log_paths else {}
             for raw_key, raw_value in raw_scores.items():
                 numeric = _to_numeric(raw_value)
                 if numeric is None:
                     continue
                 canonical = _canonicalize_rescore_key("vina", str(raw_key))
                 vina_scores[canonical] = float(numeric)
+
+            vina_scoring_set = {str(fn).strip().lower() for fn in (vina_scoring_functions or [])}
+            if "vinardo" in vina_scoring_set and "vina_vinardo" not in vina_scores:
+                fallback_keys = sorted(k for k in vina_scores if re.fullmatch(r"vina_\d+", k))
+                if fallback_keys:
+                    vina_scores["vina_vinardo"] = vina_scores[fallback_keys[0]]
+            for fallback_key in [k for k in list(vina_scores) if re.fullmatch(r"vina_\d+", k)]:
+                vina_scores.pop(fallback_key, None)
         except Exception:
             pass
         if vina_scores:
             rescoring["vina"] = vina_scores
 
-    if "smina" in pipeline_rescoring_engines_set and "smina" in ctx and representative_pdbqt and representative_pdbqt.exists():
-        smina_scores: Dict[str, float] = {}
-        smina_scoring_functions = runtime_config.smina.scoring_functions or ["vina", "vinardo", "dkoes_scoring"]
-        for scoring_function in smina_scoring_functions:
-            try:
-                ocsmina.run_rescore(
-                    ctx["smina"]["conf"],
-                    str(representative_pdbqt),
-                    ctx["smina"]["dir"],
-                    scoring_function,
-                    splitLigand=False,
-                    overwrite=True,
-                )
-            except Exception:
-                continue
-        try:
-            log_paths = ocsmina.get_rescore_log_paths(ctx["smina"]["dir"])
-            raw_scores = ocsmina.read_rescore_logs(log_paths, onlyBest=True) if log_paths else {}
-            for raw_key, raw_value in raw_scores.items():
-                numeric = _to_numeric(raw_value)
-                if numeric is None:
+    if "smina" in pipeline_rescoring_engines_set and representative_pdbqt and representative_pdbqt.exists():
+        smina_ctx: Optional[Dict[str, str]] = ctx.get("smina")
+        if smina_ctx is None:
+            # Reuse Vina/Gnina config for rescoring-only Smina runs.
+            for fallback_engine in ("vina", "gnina"):
+                fallback_ctx = ctx.get(fallback_engine)
+                if not fallback_ctx:
                     continue
-                canonical = _canonicalize_rescore_key("smina", str(raw_key))
-                smina_scores[canonical] = float(numeric)
-        except Exception:
-            pass
-        if smina_scores:
-            rescoring["smina"] = smina_scores
+                fallback_conf = str(fallback_ctx.get("conf", "")).strip()
+                if not fallback_conf:
+                    continue
+                smina_rescore_dir = outdir / "sminaRescoreFiles"
+                smina_rescore_dir.mkdir(parents=True, exist_ok=True)
+                smina_ctx = {
+                    "conf": fallback_conf,
+                    "dir": str(smina_rescore_dir),
+                }
+                break
+
+        smina_conf = str((smina_ctx or {}).get("conf", "")).strip()
+        smina_dir = str((smina_ctx or {}).get("dir", "")).strip()
+        if smina_conf and Path(smina_conf).is_file():
+            if not smina_dir:
+                smina_dir = str(outdir / "sminaRescoreFiles")
+            Path(smina_dir).mkdir(parents=True, exist_ok=True)
+
+            smina_scores: Dict[str, float] = {}
+            smina_scoring_functions = runtime_config.smina.scoring_functions or ["vina", "vinardo", "dkoes_scoring"]
+            for scoring_function in smina_scoring_functions:
+                try:
+                    ocsmina.run_rescore(
+                        smina_conf,
+                        str(representative_pdbqt),
+                        smina_dir,
+                        scoring_function,
+                        splitLigand=False,
+                        overwrite=True,
+                    )
+                except Exception:
+                    continue
+            try:
+                log_paths = ocsmina.get_rescore_log_paths(smina_dir)
+                raw_scores = ocsmina.read_rescore_logs(log_paths, onlyBest=False) if log_paths else {}
+                for raw_key, raw_value in raw_scores.items():
+                    numeric = _to_numeric(raw_value)
+                    if numeric is None:
+                        continue
+                    canonical = _canonicalize_rescore_key("smina", str(raw_key))
+                    smina_scores[canonical] = float(numeric)
+            except Exception:
+                pass
+            if smina_scores:
+                rescoring["smina"] = smina_scores
 
     if "gnina" in pipeline_rescoring_engines_set and "gnina" in ctx and representative_pdbqt and representative_pdbqt.exists():
         gnina_scores: Dict[str, float] = {}
@@ -3464,7 +3725,7 @@ def _postprocess_pipeline_box(
                 continue
         try:
             log_paths = ocgnina.get_rescore_log_paths(ctx["gnina"]["dir"])
-            raw_scores = ocgnina.read_rescore_logs(log_paths, onlyBest=True) if log_paths else {}
+            raw_scores = ocgnina.read_rescore_logs(log_paths, onlyBest=False) if log_paths else {}
             for raw_key, raw_value in raw_scores.items():
                 numeric = _to_numeric(raw_value)
                 if numeric is None:
@@ -3610,7 +3871,11 @@ def _run_pipeline_postprocess_from_summaries(
     import OCDocker.Ligand as ocl
     import OCDocker.Receptor as ocr
 
-    receptor_obj = ocr.Receptor(str(receptor_path), name=f"{job_name}_receptor")
+    receptor_obj = ocr.Receptor(
+        str(receptor_path),
+        name=f"{job_name}_receptor",
+        allow_missing_surface=True,
+    )
     ligand_name = job_name[:-7] if job_name.endswith("_ligand") else job_name
     ligand_obj = ocl.Ligand(str(ligand_path), name=ligand_name)
 
@@ -3669,7 +3934,11 @@ def _run_pipeline_postprocess_from_summaries(
         results_by_box: Dict[str, int] = {}
 
         def _process_box_isolated(box: Path) -> Tuple[str, int]:
-            isolated_receptor = ocr.Receptor(str(receptor_path), name=f"{job_name}_receptor")
+            isolated_receptor = ocr.Receptor(
+                str(receptor_path),
+                name=f"{job_name}_receptor",
+                allow_missing_surface=True,
+            )
             isolated_ligand = ocl.Ligand(str(ligand_path), name=ligand_name)
             return _process_box(box, isolated_receptor, isolated_ligand)
 
@@ -4031,27 +4300,59 @@ rule run_pipeline_core:
         job_name = f"{wildcards.database}_{wildcards.receptor}_{wildcards.kind}_{wildcards.target}"
         if not _cached_receptor_files_present(str(input.receptor)):
             _ensure_receptor_cache_ready(str(input.receptor), str(input.receptor_cache))
-        rc = _run_pipeline_postprocess_from_summaries(
-            receptor_path=str(input.receptor),
-            ligand_path=str(input.ligand),
-            box_path=str(input.box),
-            outdir_path=str(target_dir),
-            job_name=job_name,
-            engine_summary_paths=list(input.engine_summaries),
-            max_workers=threads_count,
-        )
-        if rc != 0:
-            raise RuntimeError(
-                f"OCDocker pipeline failed for {wildcards.database}/{wildcards.receptor}/{wildcards.kind}/{wildcards.target} "
-                f"with return code {rc}."
-            )
+        rc = 0
+        core_error = ""
 
-        summary, summary_output_path, per_box_summary_paths = _collect_pipeline_summary(
-            target_dir=target_dir,
-            job_name=job_name,
-        )
+        try:
+            rc = _run_pipeline_postprocess_from_summaries(
+                receptor_path=str(input.receptor),
+                ligand_path=str(input.ligand),
+                box_path=str(input.box),
+                outdir_path=str(target_dir),
+                job_name=job_name,
+                engine_summary_paths=list(input.engine_summaries),
+                max_workers=threads_count,
+            )
+        except Exception as exc:
+            rc = 90
+            core_error = f"postprocess crashed: {type(exc).__name__}: {exc}"
+
+        summary_output_path: Optional[Path] = None
+        per_box_summary_paths: List[Path] = []
+
+        if rc == 0:
+            try:
+                summary, summary_output_path, per_box_summary_paths = _collect_pipeline_summary(
+                    target_dir=target_dir,
+                    job_name=job_name,
+                )
+            except Exception as exc:
+                rc = 91
+                core_error = f"summary collection failed: {type(exc).__name__}: {exc}"
+
+        if rc != 0:
+            if not core_error:
+                core_error = f"pipeline core returned non-zero status ({rc})"
+            print(
+                f"Warning: run_pipeline_core marked as failed for "
+                f"{wildcards.database}/{wildcards.receptor}/{wildcards.kind}/{wildcards.target}: {core_error}"
+            )
+            summary = {
+                "job": job_name,
+                "pipeline_version": pipeline_version,
+                "status": "failed",
+                "success": False,
+                "error": core_error,
+                "return_code": rc,
+                "rescoring": {},
+                "rescoring_engines": [engine for engine in pipeline_rescoring_engines if engine != "oddt"],
+            }
+
         core_payload = {
             "job_name": job_name,
+            "success": (rc == 0),
+            "return_code": rc,
+            "error": core_error,
             "summary": summary,
             "summary_output_path": str(summary_output_path) if summary_output_path else "",
             "per_box_summary_paths": [str(path) for path in per_box_summary_paths],
