@@ -92,6 +92,7 @@ bootstrap_ns = argparse.Namespace(
     config_file=config_file,
     output_level=output_level,
     overwrite=bool(config.get("overwrite", False)),
+    no_splash=True,
 )
 # Do a lightweight bootstrap during DAG parsing; DB is initialized lazily at store time.
 ocinit.bootstrap(bootstrap_ns, init_db=False)
