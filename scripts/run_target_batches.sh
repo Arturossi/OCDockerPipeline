@@ -17,6 +17,8 @@ Batch range:
   --to J                    Last batch index to run (inclusive)
                             Fractional mode default: N
                             Fixed-size mode default: --from value
+  --all                     In fixed-size mode, run from --from through the
+                            derived final batch index.
 
 Fixed-size helpers:
   --total-targets N         Total targets to use for --batch-size conversion
@@ -38,8 +40,27 @@ Examples:
   # Full run over 20 fractions
   scripts/run_target_batches.sh --total-batches 20 -- --cores 16 --resources mem_mb=28000 --keep-going
 
+  # Full fixed-size run (all derived batches)
+  scripts/run_target_batches.sh --batch-size 500 --all --conda-env ocdocker -- --cores 16 --resources mem_mb=28000 --keep-going
+
   # Same using conda env directly from script
   scripts/run_target_batches.sh --total-batches 20 --conda-env ocdocker -- --cores 16 --resources mem_mb=28000 --keep-going
+
+Complete example:
+
+  # Set up logging for a full fixed-size run with conda environment. Logs will be written to a timestamped file in logs/.
+  LOG="logs/pipeline_all_batches_$(date +%F_%H-%M-%S).log"
+
+  # Run the pipeline with nohup, logging, using a batch size of 500 and all derived batches, within the 'ocdocker' conda environment. Adjust Snakemake args as needed.
+  nohup env XDG_CACHE_HOME=/tmp TMPDIR=/tmp ./scripts/run_target_batches.sh \
+    --batch-size 500 --all --conda-env ocdocker -- \
+    --logger snkmt \
+    --logger-snkmt-db /data/hd4tb/OCDocker/OCDockerPipeline/.snakemake/snkmt.db \
+    --cores 18 --resources mem_mb=28000 --keep-going \
+    --rerun-incomplete --rerun-triggers mtime \
+    > "$LOG" 2>&1 &
+
+echo "Started. Tail with: tail -f $LOG"
 USAGE
 }
 
@@ -84,6 +105,7 @@ conda_env=""
 cache_root="/tmp"
 tmp_root="/tmp"
 dry_run=0
+run_all=0
 declare -a extra_args=()
 
 while [[ $# -gt 0 ]]; do
@@ -142,6 +164,10 @@ while [[ $# -gt 0 ]]; do
             dry_run=1
             shift
             ;;
+        --all)
+            run_all=1
+            shift
+            ;;
         -h|--help)
             usage
             exit 0
@@ -189,7 +215,11 @@ else
 
     total_batches="$(( (total_targets + batch_size - 1) / batch_size ))"
     if [[ -z "$to_idx" ]]; then
-        to_idx="$from_idx"
+        if (( run_all )); then
+            to_idx="$total_batches"
+        else
+            to_idx="$from_idx"
+        fi
     fi
     (( from_idx <= total_batches )) || fail "--from must be <= derived total batches (${total_batches})"
     (( to_idx <= total_batches )) || fail "--to must be <= derived total batches (${total_batches})"
@@ -210,6 +240,25 @@ fi
 mkdir -p "$cache_root" "$tmp_root" >/dev/null 2>&1 || true
 export XDG_CACHE_HOME="$cache_root"
 export TMPDIR="$tmp_root"
+
+# snkmt requires both flags. If DB path is provided without --logger,
+# prepend --logger snkmt automatically for convenience.
+has_logger=0
+has_logger_snkmt_db=0
+for arg in "${extra_args[@]}"; do
+    case "$arg" in
+        --logger|--logger=*)
+            has_logger=1
+            ;;
+        --logger-snkmt-db|--logger-snkmt-db=*)
+            has_logger_snkmt_db=1
+            ;;
+    esac
+done
+if (( has_logger_snkmt_db )) && (( ! has_logger )); then
+    extra_args=(--logger snkmt "${extra_args[@]}")
+    echo "Info: auto-added '--logger snkmt' because '--logger-snkmt-db' was provided."
+fi
 
 echo "Batch runner: mode=${mode}, range=${from_idx}-${to_idx}, snakefile=${snakefile}"
 echo "Runtime paths: XDG_CACHE_HOME=${XDG_CACHE_HOME}, TMPDIR=${TMPDIR}"
