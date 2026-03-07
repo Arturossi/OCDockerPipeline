@@ -114,7 +114,20 @@ _REFERENCE_LIGAND_FILENAMES = ("reference_ligand.pdb", "reference_ligand.sdf")
 
 
 def _as_bool(value: Any, default: bool = False) -> bool:
-    """Parse booleans from bool/int/string config values."""
+    '''Convert a configuration token into a boolean value.
+
+    Parameters
+    ----------
+    value : Any
+        Raw configuration value to parse.
+    default : bool, optional
+        Fallback value used when ``value`` cannot be interpreted.
+
+    Returns
+    -------
+    bool
+        Parsed boolean value.
+    '''
 
     if value is None:
         return default
@@ -135,7 +148,20 @@ overwrite = _as_bool(config.get("overwrite", False), default=False)
 
 
 def _parse_list(value, default):
-    """Parse config values accepting list/tuple/set or comma-separated string."""
+    '''Normalize a config field into a list of non-empty strings.
+
+    Parameters
+    ----------
+    value : Any
+        Runtime value provided by Snakemake config.
+    default : Any
+        Value used when ``value`` is ``None``.
+
+    Returns
+    -------
+    List[str]
+        Parsed list of stripped tokens.
+    '''
 
     if value is None:
         value = default
@@ -150,7 +176,20 @@ def _parse_list(value, default):
 
 
 def _load_ignored_targets(index_path: str) -> Set[str]:
-    """Load ignored receptor IDs from a line-based text file."""
+    '''Load ignored target identifiers from a line-based file.
+
+    Parameters
+    ----------
+    index_path : str
+        Path to a text file where each non-comment line contains one target
+        identifier.
+
+    Returns
+    -------
+    Set[str]
+        Set of ignored target identifiers. Empty when the file is missing or
+        unreadable.
+    '''
 
     text_path = str(index_path or "").strip()
     if not text_path:
@@ -174,7 +213,18 @@ def _load_ignored_targets(index_path: str) -> Set[str]:
 
 
 def _normalize_database_name(name):
-    """Normalize user-provided database names to canonical aliases."""
+    '''Normalize database aliases to canonical names used in the pipeline.
+
+    Parameters
+    ----------
+    name : Any
+        User-provided database token.
+
+    Returns
+    -------
+    str
+        Canonical database name.
+    '''
 
     lower = str(name).strip().lower()
     if lower == "pdbbind":
@@ -185,14 +235,36 @@ def _normalize_database_name(name):
 
 
 def _is_valid_file(path: Union[str, Path]) -> bool:
-    """Return ``True`` when ``path`` exists, is a file, and is non-empty."""
+    '''Check whether a path exists and points to a non-empty file.
+
+    Parameters
+    ----------
+    path : Union[str, Path]
+        Candidate file path.
+
+    Returns
+    -------
+    bool
+        ``True`` when the file exists and has non-zero size.
+    '''
 
     p = Path(path)
     return p.is_file() and p.stat().st_size > 0
 
 
 def _binary_available(executable):
-    """Check whether an executable path/name is available and runnable."""
+    '''Check whether an executable can be resolved and executed.
+
+    Parameters
+    ----------
+    executable : Any
+        Absolute path or command name.
+
+    Returns
+    -------
+    bool
+        ``True`` when the executable exists and is runnable.
+    '''
 
     if not executable:
         return False
@@ -208,7 +280,18 @@ def _binary_available(executable):
 
 
 def _normalize_exit_code(result):
-    """Normalize command/API return value into a numeric exit code."""
+    '''Normalize command results into an integer exit code.
+
+    Parameters
+    ----------
+    result : Any
+        Return payload from subprocess/API helper.
+
+    Returns
+    -------
+    int
+        Exit code compatible with shell semantics.
+    '''
 
     if isinstance(result, tuple):
         if not result:
@@ -231,25 +314,68 @@ def _normalize_exit_code(result):
 
 
 def _utc_now_iso() -> str:
-    """Return the current UTC time formatted as an ISO-8601 string."""
+    '''Return the current UTC timestamp in ISO-8601 format.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    str
+        UTC timestamp string with ``Z`` suffix.
+    '''
 
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def _utc_iso_from_timestamp(value: float) -> str:
-    """Convert a UNIX timestamp into a UTC ISO-8601 string."""
+    '''Convert a UNIX timestamp into a UTC ISO-8601 string.
+
+    Parameters
+    ----------
+    value : float
+        UNIX timestamp.
+
+    Returns
+    -------
+    str
+        UTC timestamp string with ``Z`` suffix.
+    '''
 
     return datetime.fromtimestamp(value, tz=timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def _sha256_text(value: str) -> str:
-    """Compute SHA-256 hash for a UTF-8 text payload."""
+    '''Compute SHA-256 digest for UTF-8 text.
+
+    Parameters
+    ----------
+    value : str
+        Input text.
+
+    Returns
+    -------
+    str
+        Hexadecimal SHA-256 digest.
+    '''
 
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
 def _sha256_file(path: Union[str, Path]) -> Optional[str]:
-    """Compute SHA-256 hash for a file, or ``None`` when it does not exist."""
+    '''Compute SHA-256 digest for a file.
+
+    Parameters
+    ----------
+    path : Union[str, Path]
+        File path to hash.
+
+    Returns
+    -------
+    Optional[str]
+        Hexadecimal SHA-256 digest, or ``None`` when file is missing.
+    '''
 
     file_path = Path(path)
     if not file_path.is_file():
@@ -263,7 +389,18 @@ def _sha256_file(path: Union[str, Path]) -> Optional[str]:
 
 
 def _to_jsonable(value: Any) -> Any:
-    """Recursively convert values into JSON-serializable primitives."""
+    '''Recursively convert values into JSON-serializable primitives.
+
+    Parameters
+    ----------
+    value : Any
+        Input object to normalize.
+
+    Returns
+    -------
+    Any
+        JSON-serializable representation.
+    '''
 
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
@@ -278,7 +415,18 @@ def _to_jsonable(value: Any) -> Any:
 
 
 def _json_sha256(payload: Any) -> str:
-    """Compute a stable SHA-256 hash for a JSON-normalized payload."""
+    '''Compute a stable SHA-256 digest for a JSON-normalized payload.
+
+    Parameters
+    ----------
+    payload : Any
+        Arbitrary object to hash after JSON normalization.
+
+    Returns
+    -------
+    str
+        Hexadecimal SHA-256 digest.
+    '''
 
     normalized = _to_jsonable(payload)
     text = json.dumps(normalized, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
@@ -286,7 +434,21 @@ def _json_sha256(payload: Any) -> str:
 
 
 def _file_fingerprint(path: Union[str, Path], include_sha256: bool = True) -> Dict[str, Any]:
-    """Collect reproducibility metadata (existence, size, mtime, optional SHA-256)."""
+    '''Collect reproducibility metadata for one filesystem path.
+
+    Parameters
+    ----------
+    path : Union[str, Path]
+        Target file path.
+    include_sha256 : bool, optional
+        Whether to include content digest for regular files.
+
+    Returns
+    -------
+    Dict[str, Any]
+        Metadata payload with path, existence, timestamps, size, and optional
+        digest fields.
+    '''
 
     file_path = Path(path)
     payload: Dict[str, Any] = {
@@ -306,7 +468,20 @@ def _file_fingerprint(path: Union[str, Path], include_sha256: bool = True) -> Di
 
 
 def _run_git(repo_root: Union[str, Path], args: List[str]) -> Optional[str]:
-    """Run a short git command in ``repo_root`` and return stripped stdout."""
+    '''Run a git command in a repository and return stdout.
+
+    Parameters
+    ----------
+    repo_root : Union[str, Path]
+        Repository root path.
+    args : List[str]
+        Git command arguments after ``git -C <repo_root>``.
+
+    Returns
+    -------
+    Optional[str]
+        Stripped stdout content when command succeeds, else ``None``.
+    '''
 
     root = Path(repo_root)
     try:
@@ -328,7 +503,18 @@ def _run_git(repo_root: Union[str, Path], args: List[str]) -> Optional[str]:
 
 
 def _collect_git_manifest(repo_root: Union[str, Path]) -> Dict[str, Optional[Union[str, bool]]]:
-    """Return commit/branch/dirty metadata for a git repository."""
+    '''Collect lightweight VCS metadata for reproducibility reports.
+
+    Parameters
+    ----------
+    repo_root : Union[str, Path]
+        Repository root path.
+
+    Returns
+    -------
+    Dict[str, Optional[Union[str, bool]]]
+        Commit hash, branch name, and dirty-status fields.
+    '''
 
     commit = _run_git(repo_root, ["rev-parse", "HEAD"])
     branch = _run_git(repo_root, ["rev-parse", "--abbrev-ref", "HEAD"])
@@ -341,7 +527,17 @@ def _collect_git_manifest(repo_root: Union[str, Path]) -> Dict[str, Optional[Uni
 
 
 def _runtime_cache_root() -> Path:
-    """Return a writable cache root for runtime metadata/sentinels."""
+    '''Return a writable runtime cache directory for workflow metadata.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    Path
+        Cache directory path.
+    '''
 
     primary = Path(os.getcwd()) / ".snakemake"
     try:
@@ -354,7 +550,22 @@ def _runtime_cache_root() -> Path:
 
 
 def _set_command_option(cmd: Any, flag: str, value: Union[str, int]) -> None:
-    """Set or append CLI option ``flag value`` on command lists."""
+    '''Set or append a CLI option pair on a mutable command list.
+
+    Parameters
+    ----------
+    cmd : Any
+        Command container expected to be a ``list``.
+    flag : str
+        CLI flag name (for example ``--cpu``).
+    value : Union[str, int]
+        Value associated with ``flag``.
+
+    Returns
+    -------
+    None
+        This function mutates ``cmd`` in place.
+    '''
 
     if not isinstance(cmd, list):
         return
@@ -374,7 +585,22 @@ def _set_command_option(cmd: Any, flag: str, value: Union[str, int]) -> None:
 
 
 def _apply_engine_cpu_hint(engine: str, runner: Any, threads_hint: int) -> None:
-    """Align engine ``--cpu`` arguments with Snakemake thread scheduling."""
+    '''Align engine ``--cpu`` CLI options with Snakemake thread limits.
+
+    Parameters
+    ----------
+    engine : str
+        Engine identifier (for example ``vina``, ``smina``, ``gnina``).
+    runner : Any
+        Runner object that holds per-engine command lists.
+    threads_hint : int
+        Thread count requested by Snakemake for this job.
+
+    Returns
+    -------
+    None
+        The function mutates runner command lists in place.
+    '''
 
     cpu_threads = max(1, int(threads_hint))
     if engine == "vina":
@@ -386,7 +612,18 @@ def _apply_engine_cpu_hint(engine: str, runner: Any, threads_hint: int) -> None:
 
 
 def _apply_thread_limit_env(threads_hint: int) -> int:
-    """Export thread/cpu env hints so engine subprocesses follow Snakemake limits."""
+    '''Export thread-related environment variables for subprocess consistency.
+
+    Parameters
+    ----------
+    threads_hint : int
+        Thread count requested by Snakemake for this job.
+
+    Returns
+    -------
+    int
+        Normalized thread count applied to environment variables.
+    '''
 
     threads_count = max(1, int(threads_hint))
     for env_name in (
@@ -404,7 +641,18 @@ def _apply_thread_limit_env(threads_hint: int) -> int:
 
 @lru_cache(maxsize=2)
 def _cached_reproducibility_manifest(include_python_packages: bool) -> Tuple[Dict[str, Any], Optional[str]]:
-    """Collect reproducibility manifest once per interpreter process."""
+    '''Return cached reproducibility metadata for reporting.
+
+    Parameters
+    ----------
+    include_python_packages : bool
+        Whether to include installed Python package inventory.
+
+    Returns
+    -------
+    Tuple[Dict[str, Any], Optional[str]]
+        Manifest payload and optional error message.
+    '''
 
     try:
         import OCDocker.Toolbox.Reproducibility as ocrepro
@@ -432,7 +680,44 @@ def _generate_run_report(
     payload_path: Union[str, Path],
     report_path: Union[str, Path],
 ) -> Dict[str, Any]:
-    """Build the structured run-report payload for one pipeline target."""
+    '''Build the structured run-report payload for one target execution.
+
+    Parameters
+    ----------
+    job_name : str
+        Canonical pipeline job identifier.
+    database : str
+        Database alias for the target.
+    receptor : str
+        Receptor identifier.
+    kind : str
+        Compound subset name.
+    target : str
+        Target identifier.
+    receptor_path : Union[str, Path]
+        Receptor file path.
+    ligand_path : Union[str, Path]
+        Ligand file path.
+    box_path : Union[str, Path]
+        Docking box path.
+    engine_summary_paths : List[str]
+        Per-engine status JSON paths.
+    summary : Dict[str, Any]
+        Final target summary payload.
+    summary_path : Optional[Union[str, Path]]
+        On-disk summary path, when present.
+    per_box_summary_paths : List[Union[str, Path]]
+        Per-box summary paths.
+    payload_path : Union[str, Path]
+        Final payload pickle path.
+    report_path : Union[str, Path]
+        Output run report path.
+
+    Returns
+    -------
+    Dict[str, Any]
+        Structured run-report payload.
+    '''
 
     ocdocker_manifest, ocdocker_manifest_error = _cached_reproducibility_manifest(
         pipeline_report_include_python_packages
@@ -541,7 +826,18 @@ def _generate_run_report(
 
 @contextmanager
 def _file_lock(lock_path: Union[str, Path]):
-    """Provide an inter-process file lock context manager for shared artifacts."""
+    '''Provide an inter-process file lock for shared artifact writes.
+
+    Parameters
+    ----------
+    lock_path : Union[str, Path]
+        Lockfile path.
+
+    Returns
+    -------
+    contextmanager
+        Context manager that acquires and releases the lock.
+    '''
 
     lock_path = Path(lock_path)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
@@ -560,7 +856,18 @@ def _file_lock(lock_path: Union[str, Path]):
 
 
 def _box_sort_key(path: Path) -> Tuple[int, object]:
-    """Sort ``box*.pdb`` names numerically before fallback lexical ordering."""
+    '''Build a stable sorting key for docking box files.
+
+    Parameters
+    ----------
+    path : Path
+        Candidate box file path.
+
+    Returns
+    -------
+    Tuple[int, object]
+        Sorting tuple preferring numeric ``boxN`` ordering.
+    '''
 
     stem = path.stem.lower()
     if stem.startswith("box"):
@@ -571,7 +878,22 @@ def _box_sort_key(path: Path) -> Tuple[int, object]:
 
 
 def _list_boxes(ligand_dir: Path, box_path: Path, all_boxes: bool) -> List[Path]:
-    """Resolve default or multi-box input list for a target and return sorted unique paths."""
+    '''Resolve one or many docking box files for a target.
+
+    Parameters
+    ----------
+    ligand_dir : Path
+        Ligand directory to scan for ``box*.pdb`` files.
+    box_path : Path
+        Default box path.
+    all_boxes : bool
+        Whether to use all discovered boxes instead of only default box.
+
+    Returns
+    -------
+    List[Path]
+        Sorted unique list of box paths.
+    '''
 
     if not all_boxes:
         return [box_path]
@@ -599,7 +921,22 @@ def _ensure_mol2_poses(
     dest_dir: Path,
     pose_engine_map: Optional[Dict[str, str]] = None,
 ) -> Tuple[List[str], Dict[str, str]]:
-    """Ensure poses are available in MOL2 format and keep source mapping."""
+    '''Ensure pose files exist in MOL2 format for downstream scoring.
+
+    Parameters
+    ----------
+    pose_paths : List[str]
+        Input pose file paths.
+    dest_dir : Path
+        Output directory for converted MOL2 files.
+    pose_engine_map : Optional[Dict[str, str]], optional
+        Mapping from pose path to engine name for output naming.
+
+    Returns
+    -------
+    Tuple[List[str], Dict[str, str]]
+        Converted MOL2 paths and mapping from MOL2 path to original source path.
+    '''
 
     import OCDocker.Toolbox.Conversion as occonversion
 
@@ -626,7 +963,18 @@ def _ensure_mol2_poses(
 
 
 def _is_integer_descriptor_name(descriptor: str) -> bool:
-    """Identify descriptor names that should be stored as integer values."""
+    '''Check whether a descriptor should be stored as an integer.
+
+    Parameters
+    ----------
+    descriptor : str
+        Descriptor name.
+
+    Returns
+    -------
+    bool
+        ``True`` when descriptor is integer-like.
+    '''
 
     name = descriptor.strip()
     return (
@@ -638,7 +986,18 @@ def _is_integer_descriptor_name(descriptor: str) -> bool:
 
 
 def _to_numeric(value: Any) -> Optional[float]:
-    """Safely convert supported numeric values to finite ``float``."""
+    '''Safely coerce numeric values to finite ``float``.
+
+    Parameters
+    ----------
+    value : Any
+        Candidate value.
+
+    Returns
+    -------
+    Optional[float]
+        Finite float value, otherwise ``None``.
+    '''
 
     if isinstance(value, bool):
         return float(int(value))
@@ -652,7 +1011,18 @@ def _to_numeric(value: Any) -> Optional[float]:
 
 
 def _descriptor_attribute_candidates(descriptor: str) -> List[str]:
-    """Return likely attribute names for one descriptor key."""
+    '''Generate candidate attribute names for one descriptor key.
+
+    Parameters
+    ----------
+    descriptor : str
+        Descriptor key.
+
+    Returns
+    -------
+    List[str]
+        Candidate attribute names in lookup order.
+    '''
 
     base = descriptor.strip()
     if not base:
@@ -667,7 +1037,20 @@ def _descriptor_attribute_candidates(descriptor: str) -> List[str]:
 
 
 def _collect_numeric_descriptors(obj: Any, descriptor_names: List[str]) -> Dict[str, Union[int, float]]:
-    """Extract selected numeric descriptors from an object attribute set."""
+    '''Extract numeric descriptor values from an object.
+
+    Parameters
+    ----------
+    obj : Any
+        Object exposing descriptor attributes.
+    descriptor_names : List[str]
+        Descriptor names to collect.
+
+    Returns
+    -------
+    Dict[str, Union[int, float]]
+        Descriptor dictionary with numeric values.
+    '''
 
     payload: Dict[str, Union[int, float]] = {}
     for descriptor in descriptor_names:
@@ -691,7 +1074,18 @@ def _collect_numeric_descriptors(obj: Any, descriptor_names: List[str]) -> Dict[
 
 
 def _map_score_to_complex_column(raw_key: str) -> Optional[str]:
-    """Map raw rescoring keys to ``Complexes`` table score columns."""
+    '''Map raw rescoring keys to ``Complexes`` model columns.
+
+    Parameters
+    ----------
+    raw_key : str
+        Raw score key from rescoring payload.
+
+    Returns
+    -------
+    Optional[str]
+        Destination column name, or ``None`` when unmapped.
+    '''
 
     key = raw_key.strip().lower().replace("-", "_").replace(" ", "_")
     while "__" in key:
@@ -750,7 +1144,18 @@ def _map_score_to_complex_column(raw_key: str) -> Optional[str]:
 
 
 def _flatten_rescoring_to_complex_payload(rescoring: Dict[str, Dict[str, float]]) -> Tuple[Dict[str, float], List[str]]:
-    """Flatten nested rescoring maps into DB-ready score payload."""
+    '''Flatten nested rescoring map into DB-ready score payload.
+
+    Parameters
+    ----------
+    rescoring : Dict[str, Dict[str, float]]
+        Engine-scoped rescoring values.
+
+    Returns
+    -------
+    Tuple[Dict[str, float], List[str]]
+        Mapped score payload and list of ignored score keys.
+    '''
 
     payload: Dict[str, float] = {}
     ignored_keys: List[str] = []
@@ -772,7 +1177,17 @@ def _flatten_rescoring_to_complex_payload(rescoring: Dict[str, Dict[str, float]]
 
 
 def _ensure_db_runtime() -> None:
-    """Initialize DB engine/session/schema lazily before pipeline writes."""
+    '''Initialize DB runtime state lazily before any write operation.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
+        Initializes global DB engine/session and schema markers as needed.
+    '''
 
     import OCDocker.Initialise as ocinit_runtime
     import OCDocker.DB.DB as ocdb_runtime
@@ -876,7 +1291,33 @@ def _store_pipeline_results_in_db(
     representative_engine: Optional[str] = None,
     summary: Optional[Dict[str, Any]] = None,
 ) -> Tuple[bool, str, List[str]]:
-    """Upsert receptor/ligand/complex/pipeline-run records for one result."""
+    '''
+    Upsert receptor/ligand/complex/pipeline-run records for one result.
+
+    Parameters
+    ----------
+    job_name : str
+        Pipeline job identifier.
+    receptor : Any
+        Receptor object with descriptor attributes.
+    ligand : Any
+        Ligand object with descriptor attributes.
+    rescoring : Dict[str, Dict[str, float]]
+        Rescoring payload keyed by engine and score name.
+    box_label : Optional[str], default=None
+        Optional box label appended to complex name.
+    representative_pose : Optional[str], default=None
+        Path to representative pose used in aggregation.
+    representative_engine : Optional[str], default=None
+        Engine name of representative pose.
+    summary : Optional[Dict[str, Any]], default=None
+        Optional summary payload persisted with pipeline run record.
+
+    Returns
+    -------
+    Tuple[bool, str, List[str]]
+        Success flag, stored complex name, and ignored score keys.
+    '''
 
     _ensure_db_runtime()
 
@@ -935,7 +1376,21 @@ def _store_pipeline_results_in_db(
 
 
 def _pipeline_progress_row_name(job_name: str, engine: str) -> str:
-    """Build a deterministic DB row name for engine progress records."""
+    '''
+    Build a deterministic DB row name for engine progress records.
+
+    Parameters
+    ----------
+    job_name : str
+        Pipeline job identifier.
+    engine : str
+        Engine name associated with the progress event.
+
+    Returns
+    -------
+    str
+        Stable ``PipelineRuns.name`` value for progress upserts.
+    '''
 
     return f"{job_name}__progress__{engine}"
 
@@ -952,7 +1407,35 @@ def _store_engine_progress_in_db(
     summary_path: Optional[str] = None,
     summary: Optional[Dict[str, Any]] = None,
 ) -> None:
-    """Persist mid-execution engine progress events into ``PipelineRuns``."""
+    '''
+    Persist mid-execution engine progress events into ``PipelineRuns``.
+
+    Parameters
+    ----------
+    job_name : str
+        Pipeline job identifier.
+    database : str
+        Database alias for the running target.
+    receptor : str
+        Receptor identifier.
+    kind : str
+        Target kind (for example ``ligands`` or ``decoys``).
+    target : str
+        Target identifier.
+    engine : str
+        Engine responsible for the progress event.
+    phase : str
+        Execution phase label (for example ``started`` or ``finished``).
+    summary_path : Optional[str], default=None
+        Optional path to the engine summary JSON.
+    summary : Optional[Dict[str, Any]], default=None
+        Optional summary payload to embed into the DB event record.
+
+    Returns
+    -------
+    None
+        This function writes side effects only.
+    '''
 
     if not (pipeline_store_db and pipeline_store_db_mid_execution):
         return
@@ -998,7 +1481,21 @@ def _store_engine_progress_in_db(
 
 
 def _canonicalize_rescore_key(engine: str, raw_key: str) -> str:
-    """Normalize rescoring keys to a canonical ``engine_metric`` form."""
+    '''
+    Normalize rescoring keys to a canonical ``engine_metric`` form.
+
+    Parameters
+    ----------
+    engine : str
+        Engine namespace used to prefix normalized keys.
+    raw_key : str
+        Raw rescoring key produced by engine output.
+
+    Returns
+    -------
+    str
+        Canonical key name used across summaries and CSV export.
+    '''
 
     engine_key = str(engine).strip().lower()
     key = str(raw_key).strip().lower().replace("-", "_").replace(" ", "_")
@@ -1039,7 +1536,24 @@ def _canonicalize_rescore_key(engine: str, raw_key: str) -> str:
 
 
 def _prepare_cached_receptors_for_receptor(receptor_path):
-    """Prepare receptor artifacts once per receptor and reuse across ligand jobs."""
+    '''
+    Prepare receptor artifacts once per receptor and reuse across ligand jobs.
+
+    Parameters
+    ----------
+    receptor_path : str or PathLike
+        Path to the receptor structure file.
+
+    Returns
+    -------
+    None
+        This function materializes prepared receptor files on disk.
+
+    Raises
+    ------
+    RuntimeError
+        If a required prepared receptor artifact cannot be created.
+    '''
 
     import OCDocker.Docking.Gnina as ocgnina
     import OCDocker.Docking.PLANTS as ocplants
@@ -1095,7 +1609,14 @@ def _prepare_cached_receptors_for_receptor(receptor_path):
 
 
 def _cache_settings_signature() -> str:
-    """Hash cache-relevant pipeline settings into a short invalidation signature."""
+    '''
+    Hash cache-relevant pipeline settings into a short invalidation signature.
+
+    Returns
+    -------
+    str
+        SHA1 digest representing cache-relevant configuration.
+    '''
 
     signature_payload = {
         "engines": sorted(pipeline_engines_set),
@@ -1109,7 +1630,19 @@ def _cache_settings_signature() -> str:
 
 
 def _build_receptor_cache_manifest(receptor_path: Union[str, Path]) -> Dict[str, Any]:
-    """Create the receptor-preparation cache manifest for validation."""
+    '''
+    Create the receptor-preparation cache manifest for validation.
+
+    Parameters
+    ----------
+    receptor_path : Union[str, Path]
+        Path to the receptor file associated with the cache entry.
+
+    Returns
+    -------
+    Dict[str, Any]
+        Manifest dictionary with input fingerprint and prepared artifacts.
+    '''
 
     receptor_path = Path(receptor_path).resolve()
     receptor_stat = receptor_path.stat()
@@ -1145,7 +1678,21 @@ def _build_receptor_cache_manifest(receptor_path: Union[str, Path]) -> Dict[str,
 
 
 def _cache_manifest_is_valid(cache_manifest_path: Union[str, Path], receptor_path: Union[str, Path]) -> bool:
-    """Validate receptor cache manifest against current receptor/artifact state."""
+    '''
+    Validate receptor cache manifest against current receptor/artifact state.
+
+    Parameters
+    ----------
+    cache_manifest_path : Union[str, Path]
+        Path to a persisted receptor cache manifest.
+    receptor_path : Union[str, Path]
+        Path to the receptor file to validate against.
+
+    Returns
+    -------
+    bool
+        ``True`` when manifest matches current settings and files.
+    '''
 
     cache_manifest_path = Path(cache_manifest_path)
     if not cache_manifest_path.is_file():
@@ -1176,7 +1723,21 @@ def _cache_manifest_is_valid(cache_manifest_path: Union[str, Path], receptor_pat
 
 
 def _write_cache_manifest(cache_manifest_path: Union[str, Path], receptor_path: Union[str, Path]) -> None:
-    """Write receptor cache manifest JSON for a receptor entry."""
+    '''
+    Write receptor cache manifest JSON for a receptor entry.
+
+    Parameters
+    ----------
+    cache_manifest_path : Union[str, Path]
+        Destination path for the manifest JSON.
+    receptor_path : Union[str, Path]
+        Receptor path used to build current manifest content.
+
+    Returns
+    -------
+    None
+        This function writes the manifest file on disk.
+    '''
 
     cache_manifest_path = Path(cache_manifest_path)
     manifest = _build_receptor_cache_manifest(receptor_path)
@@ -1185,7 +1746,21 @@ def _write_cache_manifest(cache_manifest_path: Union[str, Path], receptor_path: 
 
 
 def _ensure_receptor_cache_ready(receptor_path: Union[str, Path], cache_manifest_path: Union[str, Path]) -> None:
-    """Prepare receptor artifacts and refresh cache manifest when stale."""
+    '''
+    Prepare receptor artifacts and refresh cache manifest when stale.
+
+    Parameters
+    ----------
+    receptor_path : Union[str, Path]
+        Path to receptor input structure.
+    cache_manifest_path : Union[str, Path]
+        Path to receptor cache manifest file.
+
+    Returns
+    -------
+    None
+        This function ensures cache artifacts and manifest consistency.
+    '''
 
     receptor_path = Path(receptor_path)
     cache_manifest_path = Path(cache_manifest_path)
@@ -1197,7 +1772,19 @@ def _ensure_receptor_cache_ready(receptor_path: Union[str, Path], cache_manifest
 
 
 def _cached_receptor_files_present(receptor_path: Union[str, Path]) -> bool:
-    """Check whether required prepared receptor files are already present."""
+    '''
+    Check whether required prepared receptor files are already present.
+
+    Parameters
+    ----------
+    receptor_path : Union[str, Path]
+        Path to receptor input structure.
+
+    Returns
+    -------
+    bool
+        ``True`` when all required prepared receptor files exist and are valid.
+    '''
 
     receptor_dir = Path(receptor_path).resolve().parent
     if pipeline_requires_pdbqt and not _is_valid_file(receptor_dir / "prepared_receptor.pdbqt"):
@@ -1208,13 +1795,45 @@ def _cached_receptor_files_present(receptor_path: Union[str, Path]) -> bool:
 
 
 def _ligand_cache_manifest_path(database: str, receptor: str, kind: str, target: str) -> str:
-    """Build the ligand preparation cache manifest path for one target."""
+    '''
+    Build the ligand preparation cache manifest path for one target.
+
+    Parameters
+    ----------
+    database : str
+        Database alias.
+    receptor : str
+        Receptor identifier.
+    kind : str
+        Target kind (for example ``ligands`` or ``decoys``).
+    target : str
+        Target identifier.
+
+    Returns
+    -------
+    str
+        Path to ligand cache manifest JSON.
+    '''
 
     return str(_target_dir_path(database, receptor, kind, target) / f".prepared_ligand_cache.{pipeline_cache_key}.json")
 
 
 def _build_ligand_cache_manifest(ligand_path: Union[str, Path], target_dir: Union[str, Path]) -> Dict[str, Any]:
-    """Create the ligand-preparation cache manifest for one target."""
+    '''
+    Create the ligand-preparation cache manifest for one target.
+
+    Parameters
+    ----------
+    ligand_path : Union[str, Path]
+        Path to ligand input file.
+    target_dir : Union[str, Path]
+        Target directory that stores prepared ligand artifacts.
+
+    Returns
+    -------
+    Dict[str, Any]
+        Manifest dictionary with ligand fingerprint and prepared artifacts.
+    '''
 
     ligand_path = Path(ligand_path).resolve()
     ligand_stat = ligand_path.stat()
@@ -1254,7 +1873,23 @@ def _ligand_cache_manifest_is_valid(
     ligand_path: Union[str, Path],
     target_dir: Union[str, Path],
 ) -> bool:
-    """Validate ligand cache manifest against current target artifact state."""
+    '''
+    Validate ligand cache manifest against current target artifact state.
+
+    Parameters
+    ----------
+    cache_manifest_path : Union[str, Path]
+        Path to ligand cache manifest JSON.
+    ligand_path : Union[str, Path]
+        Ligand input path.
+    target_dir : Union[str, Path]
+        Target directory containing prepared ligand artifacts.
+
+    Returns
+    -------
+    bool
+        ``True`` when cached manifest matches current ligand and artifacts.
+    '''
 
     cache_manifest_path = Path(cache_manifest_path)
     if not cache_manifest_path.is_file():
@@ -1289,7 +1924,23 @@ def _write_ligand_cache_manifest(
     ligand_path: Union[str, Path],
     target_dir: Union[str, Path],
 ) -> None:
-    """Write ligand cache manifest JSON for one target entry."""
+    '''
+    Write ligand cache manifest JSON for one target entry.
+
+    Parameters
+    ----------
+    cache_manifest_path : Union[str, Path]
+        Destination path for ligand cache manifest JSON.
+    ligand_path : Union[str, Path]
+        Ligand input path used to fingerprint the cache.
+    target_dir : Union[str, Path]
+        Target directory containing prepared ligand artifacts.
+
+    Returns
+    -------
+    None
+        This function writes the manifest file on disk.
+    '''
 
     cache_manifest_path = Path(cache_manifest_path)
     manifest = _build_ligand_cache_manifest(ligand_path, target_dir)
@@ -1304,7 +1955,32 @@ def _prepare_cached_ligands_for_target(
     target_dir: Union[str, Path],
     job_name: str,
 ) -> None:
-    """Prepare shared ligand artifacts once per target entry."""
+    '''
+    Prepare shared ligand artifacts once per target entry.
+
+    Parameters
+    ----------
+    receptor_path : Union[str, Path]
+        Receptor input path.
+    ligand_path : Union[str, Path]
+        Ligand input path.
+    box_path : Union[str, Path]
+        Docking box definition path.
+    target_dir : Union[str, Path]
+        Target directory where prepared ligand files are written.
+    job_name : str
+        Pipeline job identifier used in generated artifact names.
+
+    Returns
+    -------
+    None
+        This function writes prepared ligand artifacts on disk.
+
+    Raises
+    ------
+    RuntimeError
+        If required prepared artifacts cannot be created.
+    '''
 
     import OCDocker.Docking.Gnina as ocgnina
     import OCDocker.Docking.PLANTS as ocplants
@@ -1431,7 +2107,29 @@ def _ensure_ligand_cache_ready(
     cache_manifest_path: Union[str, Path],
     job_name: str,
 ) -> None:
-    """Prepare ligand artifacts and refresh cache manifest when stale."""
+    '''
+    Prepare ligand artifacts and refresh cache manifest when stale.
+
+    Parameters
+    ----------
+    receptor_path : Union[str, Path]
+        Receptor input path.
+    ligand_path : Union[str, Path]
+        Ligand input path.
+    box_path : Union[str, Path]
+        Docking box definition path.
+    target_dir : Union[str, Path]
+        Target directory that stores prepared ligand artifacts.
+    cache_manifest_path : Union[str, Path]
+        Path to ligand cache manifest JSON.
+    job_name : str
+        Pipeline job identifier used in logs/artifacts.
+
+    Returns
+    -------
+    None
+        This function ensures ligand cache artifacts and manifest consistency.
+    '''
 
     target_dir = Path(target_dir)
     cache_manifest_path = Path(cache_manifest_path)
@@ -1512,7 +2210,19 @@ pipeline_report_include_python_packages = _as_bool(
 
 
 def _parse_engine_int_map(value: Any) -> Dict[str, int]:
-    """Parse engine->integer maps from dicts or comma-separated key:value text."""
+    '''
+    Parse engine->integer maps from dicts or comma-separated key:value text.
+
+    Parameters
+    ----------
+    value : Any
+        Raw mapping value from config, either dict-like or ``"k:v,k:v"`` text.
+
+    Returns
+    -------
+    Dict[str, int]
+        Normalized engine-to-integer mapping with positive values only.
+    '''
 
     mapping: Dict[str, int] = {}
     items = None
@@ -1571,25 +2281,73 @@ pipeline_oddt_timeout = max(0, int(config.get("pipeline_oddt_timeout", config.ge
 
 
 def _engine_threads(engine: str) -> int:
-    """Return configured CPU threads for a given engine rule instance."""
+    '''
+    Return configured CPU threads for a given engine rule instance.
+
+    Parameters
+    ----------
+    engine : str
+        Engine name.
+
+    Returns
+    -------
+    int
+        Thread count for the engine.
+    '''
 
     return max(1, int(pipeline_engine_threads_map.get(engine, pipeline_engine_threads_default)))
 
 
 def _engine_mem_mb(engine: str) -> int:
-    """Return configured memory budget in MB for a given engine rule instance."""
+    '''
+    Return configured memory budget in MB for a given engine rule instance.
+
+    Parameters
+    ----------
+    engine : str
+        Engine name.
+
+    Returns
+    -------
+    int
+        Memory budget in megabytes for the engine.
+    '''
 
     return max(1, int(pipeline_engine_mem_mb_map.get(engine, pipeline_engine_mem_mb_default)))
 
 
 def _engine_gpu(engine: str) -> int:
-    """Return configured GPU slots required for a given engine rule instance."""
+    '''
+    Return configured GPU slots required for a given engine rule instance.
+
+    Parameters
+    ----------
+    engine : str
+        Engine name.
+
+    Returns
+    -------
+    int
+        Number of GPU slots consumed by one engine job.
+    '''
 
     return max(0, int(pipeline_engine_gpu_map.get(engine, pipeline_engine_gpu_default)))
 
 
 def _engine_priority(engine: str) -> int:
-    """Return configured Snakemake priority for a given engine rule instance."""
+    '''
+    Return configured Snakemake priority for a given engine rule instance.
+
+    Parameters
+    ----------
+    engine : str
+        Engine name.
+
+    Returns
+    -------
+    int
+        Snakemake priority value for scheduling.
+    '''
 
     return max(1, int(pipeline_engine_priority_map.get(engine, pipeline_engine_priority_default)))
 
@@ -1627,7 +2385,19 @@ _PRESET_DATABASES = {"PDBbind", "DUDEz"}
 
 
 def _looks_like_path(value: str) -> bool:
-    """Heuristically detect whether a config token looks like a filesystem path."""
+    '''
+    Heuristically detect whether a config token looks like a filesystem path.
+
+    Parameters
+    ----------
+    value : str
+        Candidate text token from configuration.
+
+    Returns
+    -------
+    bool
+        ``True`` when token resembles a filesystem path.
+    '''
 
     text = str(value).strip()
     if not text:
@@ -1642,7 +2412,26 @@ def _looks_like_path(value: str) -> bool:
 
 
 def _validate_database_alias(alias: str, source: str) -> None:
-    """Validate a database alias used in ``database_sources`` configuration."""
+    '''
+    Validate a database alias used in ``database_sources`` configuration.
+
+    Parameters
+    ----------
+    alias : str
+        Normalized database alias.
+    source : str
+        Original source string from configuration.
+
+    Returns
+    -------
+    None
+        This function validates and raises on invalid aliases.
+
+    Raises
+    ------
+    RuntimeError
+        If alias is empty or contains path separators.
+    '''
 
     if not alias:
         raise RuntimeError(f"Invalid database source '{source}': empty alias.")
@@ -1654,7 +2443,24 @@ def _validate_database_alias(alias: str, source: str) -> None:
 
 
 def _parse_database_sources(sources: List[str]) -> Dict[str, Dict[str, Any]]:
-    """Parse and validate configured database sources into normalized specs."""
+    '''
+    Parse and validate configured database sources into normalized specs.
+
+    Parameters
+    ----------
+    sources : List[str]
+        Raw ``database_sources`` entries from config.
+
+    Returns
+    -------
+    Dict[str, Dict[str, Any]]
+        Mapping from alias to normalized source metadata.
+
+    Raises
+    ------
+    RuntimeError
+        If configuration entries are malformed or resolve to invalid paths.
+    '''
 
     specs: Dict[str, Dict[str, Any]] = {}
     seen_aliases: Dict[str, str] = {}
@@ -1756,7 +2562,19 @@ for database, spec in database_specs.items():
 
 
 def _database_root_path(database: str) -> Path:
-    """Return source-root path for a configured database alias."""
+    '''
+    Return source-root path for a configured database alias.
+
+    Parameters
+    ----------
+    database : str
+        Database alias.
+
+    Returns
+    -------
+    Path
+        Resolved source root for the alias.
+    '''
 
     spec = database_specs.get(database)
     if spec is None:
@@ -1770,7 +2588,19 @@ database_rule_root_str = str(database_rule_root)
 
 
 def _prepare_database_mounts() -> None:
-    """Create/update per-alias symlink mounts under the pipeline database root."""
+    '''
+    Create/update per-alias symlink mounts under the pipeline database root.
+
+    Returns
+    -------
+    None
+        This function ensures alias mount points are consistent.
+
+    Raises
+    ------
+    RuntimeError
+        If an existing mount path conflicts with required source layout.
+    '''
 
     for database in selected_databases:
         source_root = _database_root_path(database).resolve()
@@ -1804,56 +2634,192 @@ _prepare_database_mounts()
 
 
 def _database_rule_root_path(database: str) -> Path:
-    """Return mounted rule root path for a database alias."""
+    '''
+    Return mounted rule root path for a database alias.
+
+    Parameters
+    ----------
+    database : str
+        Database alias.
+
+    Returns
+    -------
+    Path
+        Mounted database path used by workflow rules.
+    '''
 
     return database_rule_root / database
 
 
 def _source_receptor_path(database: str, receptor: str) -> Path:
-    """Return receptor source file path in the original database root."""
+    '''
+    Return receptor source file path in the original database root.
+
+    Parameters
+    ----------
+    database : str
+        Database alias.
+    receptor : str
+        Receptor identifier.
+
+    Returns
+    -------
+    Path
+        Path to source ``receptor.pdb``.
+    '''
 
     return _database_root_path(database) / receptor / "receptor.pdb"
 
 
 def _receptor_path(database: str, receptor: str) -> Path:
-    """Return receptor file path through the mounted database rule root."""
+    '''
+    Return receptor file path through the mounted database rule root.
+
+    Parameters
+    ----------
+    database : str
+        Database alias.
+    receptor : str
+        Receptor identifier.
+
+    Returns
+    -------
+    Path
+        Mounted path to ``receptor.pdb``.
+    '''
 
     return _database_rule_root_path(database) / receptor / "receptor.pdb"
 
 
 def _receptor_cache_manifest_path(database: str, receptor: str) -> Path:
-    """Return receptor cache manifest path for a receptor entry."""
+    '''
+    Return receptor cache manifest path for a receptor entry.
+
+    Parameters
+    ----------
+    database : str
+        Database alias.
+    receptor : str
+        Receptor identifier.
+
+    Returns
+    -------
+    Path
+        Path to receptor cache manifest JSON.
+    '''
 
     return _database_rule_root_path(database) / receptor / f".prepared_receptor_cache.{pipeline_cache_key}.json"
 
 
 def _target_dir_path(database: str, receptor: str, kind: str, target: str) -> Path:
-    """Return directory path for one target entry (database/receptor/kind/target)."""
+    '''
+    Return directory path for one target entry (database/receptor/kind/target).
+
+    Parameters
+    ----------
+    database : str
+        Database alias.
+    receptor : str
+        Receptor identifier.
+    kind : str
+        Target kind.
+    target : str
+        Target identifier.
+
+    Returns
+    -------
+    Path
+        Target directory path.
+    '''
 
     return _database_rule_root_path(database) / receptor / "compounds" / kind / target
 
 
 def _ligand_path(database: str, receptor: str, kind: str, target: str) -> Path:
-    """Return ligand input path (``ligand.smi``) for one target entry."""
+    '''
+    Return ligand input path (``ligand.smi``) for one target entry.
+
+    Parameters
+    ----------
+    database : str
+        Database alias.
+    receptor : str
+        Receptor identifier.
+    kind : str
+        Target kind.
+    target : str
+        Target identifier.
+
+    Returns
+    -------
+    Path
+        Ligand input path.
+    '''
 
     return _target_dir_path(database, receptor, kind, target) / "ligand.smi"
 
 
 def _box_path(database: str, receptor: str, kind: str, target: str) -> Path:
-    """Return default docking box path (``boxes/box0.pdb``) for one target entry."""
+    '''
+    Return default docking box path (``boxes/box0.pdb``) for one target entry.
+
+    Parameters
+    ----------
+    database : str
+        Database alias.
+    receptor : str
+        Receptor identifier.
+    kind : str
+        Target kind.
+    target : str
+        Target identifier.
+
+    Returns
+    -------
+    Path
+        Default docking box path.
+    '''
 
     return _target_dir_path(database, receptor, kind, target) / "boxes" / "box0.pdb"
 
 
 def _reference_ligand_paths(database: str, receptor: str) -> List[Path]:
-    """Return receptor-level reference ligand candidate paths for one entry."""
+    '''
+    Return receptor-level reference ligand candidate paths for one entry.
+
+    Parameters
+    ----------
+    database : str
+        Database alias.
+    receptor : str
+        Receptor identifier.
+
+    Returns
+    -------
+    List[Path]
+        Ordered candidate paths for receptor reference ligands.
+    '''
 
     receptor_root = _database_rule_root_path(database) / receptor
     return [receptor_root / name for name in _REFERENCE_LIGAND_FILENAMES]
 
 
 def _resolve_reference_ligand_path(database: str, receptor: str) -> Optional[Path]:
-    """Return first valid receptor-level reference ligand path, if available."""
+    '''
+    Return first valid receptor-level reference ligand path, if available.
+
+    Parameters
+    ----------
+    database : str
+        Database alias.
+    receptor : str
+        Receptor identifier.
+
+    Returns
+    -------
+    Optional[Path]
+        First valid reference ligand path, else ``None``.
+    '''
 
     for candidate in _reference_ligand_paths(database, receptor):
         if _is_valid_file(candidate):
@@ -1870,7 +2836,34 @@ def _ensure_target_box_from_reference_ligand(
     ligand_path: Union[str, Path],
     box_path: Union[str, Path],
 ) -> None:
-    """Ensure ``boxes/box0.pdb`` exists, generating it from reference-ligand centroid when missing."""
+    '''
+    Ensure ``boxes/box0.pdb`` exists, generating it from reference-ligand centroid when missing.
+
+    Parameters
+    ----------
+    database : str
+        Database alias.
+    receptor : str
+        Receptor identifier.
+    kind : str
+        Target kind.
+    target : str
+        Target identifier.
+    ligand_path : Union[str, Path]
+        Candidate ligand path used to infer box size.
+    box_path : Union[str, Path]
+        Expected box output path.
+
+    Returns
+    -------
+    None
+        This function materializes box file when absent.
+
+    Raises
+    ------
+    RuntimeError
+        If no valid reference ligand is available or box generation fails.
+    '''
 
     import OCDocker.Ligand as ocl
 
@@ -1970,13 +2963,49 @@ def _ensure_target_box_from_reference_ligand(
 
 
 def _payload_path(database: str, receptor: str, kind: str, target: str) -> Path:
-    """Return final payload pickle path for one target entry."""
+    '''
+    Return final payload pickle path for one target entry.
+
+    Parameters
+    ----------
+    database : str
+        Database alias.
+    receptor : str
+        Receptor identifier.
+    kind : str
+        Target kind.
+    target : str
+        Target identifier.
+
+    Returns
+    -------
+    Path
+        Final payload pickle path.
+    '''
 
     return _target_dir_path(database, receptor, kind, target) / "payload.pkl"
 
 
 def _run_report_path(database: str, receptor: str, kind: str, target: str) -> Path:
-    """Return run-report JSON path for one target entry."""
+    '''
+    Return run-report JSON path for one target entry.
+
+    Parameters
+    ----------
+    database : str
+        Database alias.
+    receptor : str
+        Receptor identifier.
+    kind : str
+        Target kind.
+    target : str
+        Target identifier.
+
+    Returns
+    -------
+    Path
+        Run report JSON path.
+    '''
 
     return _target_dir_path(database, receptor, kind, target) / "run_report.json"
 
@@ -2038,7 +3067,19 @@ if target_discovery_mode in {"index", "hybrid"}:
 
 
 def _discover_receptors_from_filesystem(database: str) -> List[str]:
-    """Discover receptor IDs by scanning ``*/receptor.pdb`` on disk."""
+    '''
+    Discover receptor IDs by scanning ``*/receptor.pdb`` on disk.
+
+    Parameters
+    ----------
+    database : str
+        Database alias.
+
+    Returns
+    -------
+    List[str]
+        Sorted receptor identifiers found on disk.
+    '''
 
     db_dir = _database_root_path(database)
     if not db_dir.exists():
@@ -2052,7 +3093,24 @@ def _discover_receptors_from_filesystem(database: str) -> List[str]:
 
 
 def _collect_database_receptors(database: str) -> List[str]:
-    """Collect receptor IDs for one database using selected discovery mode."""
+    '''
+    Collect receptor IDs for one database using selected discovery mode.
+
+    Parameters
+    ----------
+    database : str
+        Database alias.
+
+    Returns
+    -------
+    List[str]
+        Sorted discovered receptor identifiers for the database.
+
+    Raises
+    ------
+    RuntimeError
+        If no receptors are discovered for a selected database.
+    '''
 
     receptors: List[str] = []
 
@@ -2081,13 +3139,32 @@ database_to_receptors: Dict[str, List[str]] = {
 
 
 def _target_discovery_cache_path() -> Path:
-    """Return filesystem path for target discovery cache metadata."""
+    '''
+    Return filesystem path for target discovery cache metadata.
+
+    Returns
+    -------
+    Path
+        Cache file path for discovered targets metadata.
+    '''
 
     return _runtime_cache_root() / "target_discovery_cache.json"
 
 
 def _target_discovery_signature(database_to_receptors: Dict[str, List[str]]) -> str:
-    """Build a content signature used to validate discovery-cache reuse."""
+    '''
+    Build a content signature used to validate discovery-cache reuse.
+
+    Parameters
+    ----------
+    database_to_receptors : Dict[str, List[str]]
+        Receptors discovered per database alias.
+
+    Returns
+    -------
+    str
+        Deterministic JSON hash for current discovery-relevant layout.
+    '''
 
     layout: List[Dict[str, Any]] = []
     for database in selected_databases:
@@ -2153,7 +3230,19 @@ def _target_discovery_signature(database_to_receptors: Dict[str, List[str]]) -> 
 
 
 def _load_target_discovery_cache(signature: str) -> Optional[Tuple[List[str], int]]:
-    """Load cached discovered targets when signature and schema match."""
+    '''
+    Load cached discovered targets when signature and schema match.
+
+    Parameters
+    ----------
+    signature : str
+        Expected discovery signature for current run context.
+
+    Returns
+    -------
+    Optional[Tuple[List[str], int]]
+        Cached targets and scanned count, or ``None`` when cache is invalid.
+    '''
 
     cache_path = _target_discovery_cache_path()
     if not cache_path.is_file():
@@ -2186,7 +3275,23 @@ def _load_target_discovery_cache(signature: str) -> Optional[Tuple[List[str], in
 
 
 def _write_target_discovery_cache(signature: str, targets: List[str], scanned: int) -> None:
-    """Persist discovered target list and scan statistics to cache."""
+    '''
+    Persist discovered target list and scan statistics to cache.
+
+    Parameters
+    ----------
+    signature : str
+        Discovery signature associated with the cache payload.
+    targets : List[str]
+        Discovered payload target paths.
+    scanned : int
+        Number of candidate directories scanned during discovery.
+
+    Returns
+    -------
+    None
+        This function writes the discovery cache file.
+    '''
 
     cache_path = _target_discovery_cache_path()
     cache_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2210,7 +3315,19 @@ def _write_target_discovery_cache(signature: str, targets: List[str], scanned: i
 
 
 def collect_payload_targets():
-    """Discover and validate all pipeline payload targets across databases."""
+    '''
+    Discover and validate all pipeline payload targets across databases.
+
+    Returns
+    -------
+    List[str]
+        Sorted payload target paths for workflow execution.
+
+    Raises
+    ------
+    RuntimeError
+        If no valid targets are found after discovery and validation.
+    '''
 
     targets = []
     scanned = 0
@@ -2279,13 +3396,32 @@ all_payload_targets = collect_payload_targets()
 
 
 def _database_results_csv_path(database: str) -> str:
-    """Return consolidated CSV export path for one database alias."""
+    '''
+    Return consolidated CSV export path for one database alias.
+
+    Parameters
+    ----------
+    database : str
+        Database alias.
+
+    Returns
+    -------
+    str
+        Path to per-database consolidated CSV file.
+    '''
 
     return str(_database_rule_root_path(database) / "pipeline_results.csv")
 
 
 def _collect_database_csv_targets() -> List[str]:
-    """Return CSV outputs requested by ``rule all`` based on config."""
+    '''
+    Return CSV outputs requested by ``rule all`` based on config.
+
+    Returns
+    -------
+    List[str]
+        CSV output paths requested by current configuration.
+    '''
 
     if not pipeline_export_database_csv:
         return []
@@ -2293,7 +3429,19 @@ def _collect_database_csv_targets() -> List[str]:
 
 
 def _payload_targets_for_database(database: str) -> List[str]:
-    """Filter global payload targets to only those under one database root."""
+    '''
+    Filter global payload targets to only those under one database root.
+
+    Parameters
+    ----------
+    database : str
+        Database alias.
+
+    Returns
+    -------
+    List[str]
+        Sorted payload paths belonging to the given database.
+    '''
 
     db_root = _database_rule_root_path(database).resolve()
     targets: List[str] = []
@@ -2308,7 +3456,19 @@ def _payload_targets_for_database(database: str) -> List[str]:
 
 
 def _csv_scalar(value: Any) -> str:
-    """Convert values to stable scalar strings for CSV serialization."""
+    '''
+    Convert values to stable scalar strings for CSV serialization.
+
+    Parameters
+    ----------
+    value : Any
+        Value to normalize into CSV-safe scalar text.
+
+    Returns
+    -------
+    str
+        Normalized scalar string representation.
+    '''
 
     if value is None:
         return ""
@@ -2322,7 +3482,19 @@ def _csv_scalar(value: Any) -> str:
 
 
 def _csv_key(value: Any) -> str:
-    """Normalize free-form keys into safe lowercase CSV column identifiers."""
+    '''
+    Normalize free-form keys into safe lowercase CSV column identifiers.
+
+    Parameters
+    ----------
+    value : Any
+        Raw key to normalize.
+
+    Returns
+    -------
+    str
+        Sanitized lowercase identifier suitable for CSV columns.
+    '''
 
     key = str(value).strip().lower()
     key = re.sub(r"[^0-9a-zA-Z_]+", "_", key)
@@ -2331,11 +3503,39 @@ def _csv_key(value: Any) -> str:
 
 
 def _flatten_summary_rescoring_for_csv(summary: Dict[str, Any]) -> Dict[str, float]:
-    """Flatten summary rescoring payloads into tabular CSV columns."""
+    '''
+    Flatten summary rescoring payloads into tabular CSV columns.
+
+    Parameters
+    ----------
+    summary : Dict[str, Any]
+        Pipeline summary payload containing rescoring data.
+
+    Returns
+    -------
+    Dict[str, float]
+        Flattened mapping from CSV column names to numeric scores.
+    '''
 
     flattened: Dict[str, float] = {}
 
     def _ingest_rescoring(rescoring_data: Any, prefix: str = "") -> None:
+        '''
+        Ingest one rescoring dictionary into flattened CSV score columns.
+
+        Parameters
+        ----------
+        rescoring_data : Any
+            Rescoring payload expected to be engine->score mapping.
+        prefix : str, default=""
+            Optional column prefix (for example per-box prefix).
+
+        Returns
+        -------
+        None
+            This function mutates ``flattened`` in place.
+        '''
+
         if not isinstance(rescoring_data, dict):
             return
         for engine, engine_scores in rescoring_data.items():
@@ -2363,7 +3563,21 @@ def _flatten_summary_rescoring_for_csv(summary: Dict[str, Any]) -> Dict[str, flo
 
 
 def _config_score_column_for_csv(engine: str, scoring_function: str) -> Optional[str]:
-    """Map one scoring function from OCDocker.cfg into a CSV column name."""
+    '''
+    Map one scoring function from OCDocker.cfg into a CSV column name.
+
+    Parameters
+    ----------
+    engine : str
+        Scoring engine name.
+    scoring_function : str
+        Raw scoring function name from configuration.
+
+    Returns
+    -------
+    Optional[str]
+        Normalized CSV column name, or ``None`` when unmapped.
+    '''
 
     engine_key = str(engine).strip().lower()
     sf_key = _csv_key(scoring_function)
@@ -2391,11 +3605,32 @@ def _config_score_column_for_csv(engine: str, scoring_function: str) -> Optional
 
 
 def _configured_score_columns_for_csv() -> List[str]:
-    """Return score columns ordered by scoring_functions in OCDocker.cfg."""
+    '''
+    Return score columns ordered by scoring_functions in OCDocker.cfg.
+
+    Returns
+    -------
+    List[str]
+        Ordered score column names derived from OCDocker configuration.
+    '''
 
     ordered: List[str] = []
 
     def _add(column: Optional[str]) -> None:
+        '''
+        Append a column to ordered output if it is valid and unseen.
+
+        Parameters
+        ----------
+        column : Optional[str]
+            Candidate column name.
+
+        Returns
+        -------
+        None
+            This function mutates ``ordered`` in place.
+        '''
+
         if not column:
             return
         if column not in ordered:
@@ -2417,7 +3652,23 @@ def _configured_score_columns_for_csv() -> List[str]:
 
 
 def _write_database_results_csv(database: str, payload_paths: List[str], csv_path: Union[str, Path]) -> None:
-    """Write a consolidated per-database CSV from target payloads and summaries."""
+    '''
+    Write a consolidated per-database CSV from target payloads and summaries.
+
+    Parameters
+    ----------
+    database : str
+        Database alias being exported.
+    payload_paths : List[str]
+        Payload pickle paths included in the CSV.
+    csv_path : Union[str, Path]
+        Destination CSV path.
+
+    Returns
+    -------
+    None
+        This function writes consolidated CSV output to disk.
+    '''
 
     import csv
 
@@ -2449,6 +3700,22 @@ def _write_database_results_csv(database: str, payload_paths: List[str], csv_pat
     ligand_descriptor_cache: Dict[str, Dict[str, Union[int, float]]] = {}
 
     def _load_receptor_descriptors(receptor_path: Path, receptor_name: str) -> Dict[str, Union[int, float]]:
+        '''
+        Load or compute receptor descriptor values for CSV output.
+
+        Parameters
+        ----------
+        receptor_path : Path
+            Receptor structure path.
+        receptor_name : str
+            Receptor identifier used for object naming.
+
+        Returns
+        -------
+        Dict[str, Union[int, float]]
+            Numeric receptor descriptor mapping.
+        '''
+
         cache_key = str(receptor_path.resolve())
         if cache_key in receptor_descriptor_cache:
             return receptor_descriptor_cache[cache_key]
@@ -2479,6 +3746,22 @@ def _write_database_results_csv(database: str, payload_paths: List[str], csv_pat
         return payload
 
     def _load_ligand_descriptors(ligand_paths: List[Path], target_name: str) -> Dict[str, Union[int, float]]:
+        '''
+        Load or compute ligand descriptor values for CSV output.
+
+        Parameters
+        ----------
+        ligand_paths : List[Path]
+            Candidate ligand paths to probe for descriptors.
+        target_name : str
+            Target identifier used for object naming.
+
+        Returns
+        -------
+        Dict[str, Union[int, float]]
+            Numeric ligand descriptor mapping.
+        '''
+
         if ligand_module is None:
             return {}
 
@@ -2667,25 +3950,85 @@ def _engine_summary_inputs(wildcards) -> List[str]:
 
 
 def _pipeline_core_summary_path(database: str, receptor: str, kind: str, target: str) -> str:
-    """Build the intermediate core-summary path for one target entry."""
+    '''
+    Build the intermediate core-summary path for one target entry.
+
+    Parameters
+    ----------
+    database : str
+        Database alias.
+    receptor : str
+        Receptor identifier.
+    kind : str
+        Target kind.
+    target : str
+        Target identifier.
+
+    Returns
+    -------
+    str
+        Absolute path to ``pipeline_core_summary.json``.
+    '''
 
     return str(_target_dir_path(database, receptor, kind, target) / "pipeline_core_summary.json")
 
 
 def _oddt_status_path(database: str, receptor: str, kind: str, target: str) -> str:
-    """Build the intermediate ODDT status path for one target entry."""
+    '''
+    Build the intermediate ODDT status path for one target entry.
+
+    Parameters
+    ----------
+    database : str
+        Database alias.
+    receptor : str
+        Receptor identifier.
+    kind : str
+        Target kind.
+    target : str
+        Target identifier.
+
+    Returns
+    -------
+    str
+        Absolute path to ``oddt_status.json``.
+    '''
 
     return str(_target_dir_path(database, receptor, kind, target) / "oddt_status.json")
 
 
 def _wc_core_summary_path(wildcards) -> str:
-    """Resolve core-summary intermediate path from Snakemake wildcards."""
+    '''
+    Resolve core-summary intermediate path from Snakemake wildcards.
+
+    Parameters
+    ----------
+    wildcards : Any
+        Snakemake wildcards carrying ``database/receptor/kind/target`` fields.
+
+    Returns
+    -------
+    str
+        Absolute core-summary path for the wildcard tuple.
+    '''
 
     return _pipeline_core_summary_path(wildcards.database, wildcards.receptor, wildcards.kind, wildcards.target)
 
 
 def _wc_oddt_status_path(wildcards) -> str:
-    """Resolve ODDT-status intermediate path from Snakemake wildcards."""
+    '''
+    Resolve ODDT-status intermediate path from Snakemake wildcards.
+
+    Parameters
+    ----------
+    wildcards : Any
+        Snakemake wildcards carrying ``database/receptor/kind/target`` fields.
+
+    Returns
+    -------
+    str
+        Absolute ODDT status path for the wildcard tuple.
+    '''
 
     return _oddt_status_path(wildcards.database, wildcards.receptor, wildcards.kind, wildcards.target)
 
@@ -2694,7 +4037,26 @@ def _collect_pipeline_summary(
     target_dir: Path,
     job_name: str,
 ) -> Tuple[Dict[str, Any], Optional[Path], List[Path]]:
-    """Load summary outputs generated by post-processing for one target."""
+    '''
+    Load summary outputs generated by post-processing for one target.
+
+    Parameters
+    ----------
+    target_dir : Path
+        Target directory containing summary artifacts.
+    job_name : str
+        Pipeline job identifier.
+
+    Returns
+    -------
+    Tuple[Dict[str, Any], Optional[Path], List[Path]]
+        Summary payload, optional summary file path, and per-box summary paths.
+
+    Raises
+    ------
+    RuntimeError
+        If required summary outputs are missing.
+    '''
 
     summary_path = target_dir / "summary.json"
     summary_output_path: Optional[Path] = None
@@ -2731,7 +4093,21 @@ def _collect_pipeline_summary(
 
 
 def _write_json(path: Union[str, Path], payload: Any) -> None:
-    """Write JSON payload with stable formatting."""
+    '''
+    Write JSON payload with stable formatting.
+
+    Parameters
+    ----------
+    path : Union[str, Path]
+        Destination JSON path.
+    payload : Any
+        Payload to serialize as JSON.
+
+    Returns
+    -------
+    None
+        This function writes JSON to disk.
+    '''
 
     out_path = Path(path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2739,7 +4115,19 @@ def _write_json(path: Union[str, Path], payload: Any) -> None:
 
 
 def _find_prepared_receptor_for_oddt(receptor_path: Union[str, Path]) -> Optional[Path]:
-    """Locate a prepared receptor suitable for ODDT rescoring."""
+    '''
+    Locate a prepared receptor suitable for ODDT rescoring.
+
+    Parameters
+    ----------
+    receptor_path : Union[str, Path]
+        Primary receptor input path.
+
+    Returns
+    -------
+    Optional[Path]
+        First valid prepared receptor candidate, else ``None``.
+    '''
 
     receptor_path = Path(receptor_path)
     receptor_dir = receptor_path.resolve().parent
@@ -2755,7 +4143,19 @@ def _find_prepared_receptor_for_oddt(receptor_path: Union[str, Path]) -> Optiona
 
 
 def _extract_oddt_scores_from_dataframe(data: Any) -> Dict[str, float]:
-    """Convert the first-row ODDT API DataFrame into canonical `oddt_*` keys."""
+    '''
+    Convert the first-row ODDT API DataFrame into canonical `oddt_*` keys.
+
+    Parameters
+    ----------
+    data : Any
+        ODDT API dataframe-like object.
+
+    Returns
+    -------
+    Dict[str, float]
+        Canonical ODDT score mapping extracted from the first row.
+    '''
 
     scores: Dict[str, float] = {}
     if data is None or not hasattr(data, "empty") or bool(getattr(data, "empty", True)):
@@ -2767,6 +4167,20 @@ def _extract_oddt_scores_from_dataframe(data: Any) -> Dict[str, float]:
         return scores
 
     def _coerce_numeric(value: Any) -> Optional[float]:
+        '''
+        Coerce nested ODDT cell payloads into finite floats.
+
+        Parameters
+        ----------
+        value : Any
+            Raw score cell value.
+
+        Returns
+        -------
+        Optional[float]
+            Parsed finite float, or ``None`` when conversion fails.
+        '''
+
         numeric = _to_numeric(value)
         if numeric is not None:
             return float(numeric)
@@ -2802,7 +4216,29 @@ def _run_oddt_api_once(
     threads_hint: int,
     chunksize: int,
 ) -> Dict[str, Any]:
-    """Execute ODDT API once and return parsed status payload."""
+    '''
+    Execute ODDT API once and return parsed status payload.
+
+    Parameters
+    ----------
+    receptor_path : str
+        Prepared receptor path used for ODDT scoring.
+    ligand_path : str
+        Ligand pose path used for ODDT scoring.
+    run_name : str
+        Run identifier for generated ODDT output files.
+    output_dir : str
+        Directory for ODDT output files.
+    threads_hint : int
+        CPU thread hint passed to ODDT.
+    chunksize : int
+        ODDT processing chunk size.
+
+    Returns
+    -------
+    Dict[str, Any]
+        Structured ODDT execution status payload.
+    '''
 
     try:
         import OCDocker.Rescoring.ODDT as ocoddt
@@ -2854,7 +4290,31 @@ def _run_oddt_api_worker(
     threads_hint: int,
     chunksize: int,
 ) -> None:
-    """Execute ODDT API in a worker process and publish parsed payload to a queue."""
+    '''
+    Execute ODDT API in a worker process and publish parsed payload to a queue.
+
+    Parameters
+    ----------
+    queue : Any
+        Multiprocessing queue used to return status payload.
+    receptor_path : str
+        Prepared receptor path used for ODDT scoring.
+    ligand_path : str
+        Ligand pose path used for ODDT scoring.
+    run_name : str
+        Run identifier for generated ODDT output files.
+    output_dir : str
+        Directory for ODDT output files.
+    threads_hint : int
+        CPU thread hint passed to ODDT.
+    chunksize : int
+        ODDT processing chunk size.
+
+    Returns
+    -------
+    None
+        This function writes one payload into ``queue``.
+    '''
 
     queue.put(
         _run_oddt_api_once(
@@ -2877,7 +4337,29 @@ def _run_oddt_api_for_pose(
     timeout_seconds: int,
     threads_hint: int,
 ) -> Dict[str, Any]:
-    """Run ODDT API for one representative pose and return status payload."""
+    '''
+    Run ODDT API for one representative pose and return status payload.
+
+    Parameters
+    ----------
+    receptor_path : Path
+        Prepared receptor path used for ODDT scoring.
+    ligand_path : Path
+        Representative ligand pose path used for ODDT scoring.
+    output_dir : Path
+        Output directory for ODDT files.
+    run_name : str
+        Run identifier for generated outputs.
+    timeout_seconds : int
+        Timeout in seconds for ODDT execution (``<=0`` disables timeout).
+    threads_hint : int
+        CPU thread hint passed to ODDT.
+
+    Returns
+    -------
+    Dict[str, Any]
+        Structured ODDT execution result payload.
+    '''
 
     result: Dict[str, Any] = {
         "success": False,
@@ -2967,9 +4449,39 @@ def _run_oddt_api_for_pose(
 
 
 def _apply_oddt_status_to_summary(summary: Dict[str, Any], oddt_status: Dict[str, Any]) -> Dict[str, Any]:
-    """Merge dedicated ODDT rule scores into a pipeline summary payload."""
+    '''
+    Merge dedicated ODDT rule scores into a pipeline summary payload.
+
+    Parameters
+    ----------
+    summary : Dict[str, Any]
+        Existing pipeline summary payload.
+    oddt_status : Dict[str, Any]
+        ODDT status payload produced by the dedicated ODDT rule.
+
+    Returns
+    -------
+    Dict[str, Any]
+        Updated summary payload including ODDT status and scores.
+    '''
 
     def _merge_scores(target_summary: Dict[str, Any], scores: Dict[str, Any]) -> None:
+        '''
+        Merge ODDT numeric scores into one summary object.
+
+        Parameters
+        ----------
+        target_summary : Dict[str, Any]
+            Summary payload (root or box-level) to update.
+        scores : Dict[str, Any]
+            ODDT score mapping to merge.
+
+        Returns
+        -------
+        None
+            This function mutates ``target_summary`` in place.
+        '''
+
         if not isinstance(scores, dict) or not scores:
             return
 
@@ -3013,7 +4525,19 @@ def _apply_oddt_status_to_summary(summary: Dict[str, Any], oddt_status: Dict[str
 
 
 def _preset_receptor_inputs(preset_name: str) -> List[str]:
-    """Collect receptor rule inputs for a preset dataset family alias."""
+    '''
+    Collect receptor rule inputs for a preset dataset family alias.
+
+    Parameters
+    ----------
+    preset_name : str
+        Preset dataset family name (for example ``PDBbind`` or ``DUDEz``).
+
+    Returns
+    -------
+    List[str]
+        Sorted receptor input paths for matching preset aliases.
+    '''
 
     paths: List[str] = []
     for database in preset_database_aliases.get(preset_name, []):
@@ -3023,31 +4547,91 @@ def _preset_receptor_inputs(preset_name: str) -> List[str]:
 
 
 def _wc_receptor_path(wildcards) -> str:
-    """Resolve receptor input path from Snakemake wildcards."""
+    '''
+    Resolve receptor input path from Snakemake wildcards.
+
+    Parameters
+    ----------
+    wildcards : Any
+        Snakemake wildcard object.
+
+    Returns
+    -------
+    str
+        Receptor input path for current wildcard tuple.
+    '''
 
     return str(_receptor_path(wildcards.database, wildcards.receptor))
 
 
 def _wc_receptor_cache_manifest_path(wildcards) -> str:
-    """Resolve receptor cache-manifest path from Snakemake wildcards."""
+    '''
+    Resolve receptor cache-manifest path from Snakemake wildcards.
+
+    Parameters
+    ----------
+    wildcards : Any
+        Snakemake wildcard object.
+
+    Returns
+    -------
+    str
+        Receptor cache manifest path for current wildcard tuple.
+    '''
 
     return str(_receptor_cache_manifest_path(wildcards.database, wildcards.receptor))
 
 
 def _wc_ligand_path(wildcards) -> str:
-    """Resolve ligand input path from Snakemake wildcards."""
+    '''
+    Resolve ligand input path from Snakemake wildcards.
+
+    Parameters
+    ----------
+    wildcards : Any
+        Snakemake wildcard object.
+
+    Returns
+    -------
+    str
+        Ligand input path for current wildcard tuple.
+    '''
 
     return str(_ligand_path(wildcards.database, wildcards.receptor, wildcards.kind, wildcards.target))
 
 
 def _wc_box_path(wildcards) -> str:
-    """Resolve default box input path from Snakemake wildcards."""
+    '''
+    Resolve default box input path from Snakemake wildcards.
+
+    Parameters
+    ----------
+    wildcards : Any
+        Snakemake wildcard object.
+
+    Returns
+    -------
+    str
+        Box input path for current wildcard tuple.
+    '''
 
     return str(_box_path(wildcards.database, wildcards.receptor, wildcards.kind, wildcards.target))
 
 
 def _wc_ligand_cache_manifest_path(wildcards) -> str:
-    """Resolve ligand cache-manifest path from Snakemake wildcards."""
+    '''
+    Resolve ligand cache-manifest path from Snakemake wildcards.
+
+    Parameters
+    ----------
+    wildcards : Any
+        Snakemake wildcard object.
+
+    Returns
+    -------
+    str
+        Ligand cache manifest path for current wildcard tuple.
+    '''
 
     return _ligand_cache_manifest_path(wildcards.database, wildcards.receptor, wildcards.kind, wildcards.target)
 
@@ -3345,6 +4929,24 @@ def _run_single_engine_via_api(
     engine_cpu_threads = max(1, requested_workers // box_workers)
 
     def _run_box(box: Path, receptor: Any, ligand: Any) -> Tuple[str, Dict[str, Any]]:
+        '''
+        Execute one engine box run and return per-box result payload.
+
+        Parameters
+        ----------
+        box : Path
+            Box file path.
+        receptor : Any
+            Receptor object instance.
+        ligand : Any
+            Ligand object instance.
+
+        Returns
+        -------
+        Tuple[str, Dict[str, Any]]
+            Box identifier and structured engine result payload.
+        '''
+
         box_id = box.stem
         box_outdir = base_outdir / box_id if use_multi_boxes else base_outdir
         box_result = _run_single_engine_for_box(
@@ -3368,6 +4970,20 @@ def _run_single_engine_via_api(
         results_by_box: Dict[str, Dict[str, Any]] = {}
 
         def _run_box_isolated(box: Path) -> Tuple[str, Dict[str, Any]]:
+            '''
+            Run one box using isolated receptor/ligand objects for threading.
+
+            Parameters
+            ----------
+            box : Path
+                Box file path.
+
+            Returns
+            -------
+            Tuple[str, Dict[str, Any]]
+                Box identifier and structured engine result payload.
+            '''
+
             isolated_receptor = ocr.Receptor(
                 str(receptor_path),
                 name=f"{job_name}_receptor",
@@ -3904,6 +5520,24 @@ def _run_pipeline_postprocess_from_summaries(
     box_workers = min(len(boxes), requested_workers)
 
     def _process_box(box: Path, receptor: Any, ligand: Any) -> Tuple[str, int]:
+        '''
+        Post-process one box using loaded engine summaries.
+
+        Parameters
+        ----------
+        box : Path
+            Box file path.
+        receptor : Any
+            Receptor object instance.
+        ligand : Any
+            Ligand object instance.
+
+        Returns
+        -------
+        Tuple[str, int]
+            Box identifier and post-processing return code.
+        '''
+
         box_id = box.stem
         box_outdir = base_outdir / box_id if use_multi_boxes else base_outdir
         box_engine_results: Dict[str, Dict[str, Any]] = {}
@@ -3934,6 +5568,20 @@ def _run_pipeline_postprocess_from_summaries(
         results_by_box: Dict[str, int] = {}
 
         def _process_box_isolated(box: Path) -> Tuple[str, int]:
+            '''
+            Post-process one box with isolated objects for thread safety.
+
+            Parameters
+            ----------
+            box : Path
+                Box file path.
+
+            Returns
+            -------
+            Tuple[str, int]
+                Box identifier and post-processing return code.
+            '''
+
             isolated_receptor = ocr.Receptor(
                 str(receptor_path),
                 name=f"{job_name}_receptor",
@@ -4106,7 +5754,27 @@ rule prepare_ligand_cache:
 
 
 def _run_engine_job(*, wildcards, rule_input, rule_output, threads_count: int, engine_name: str) -> None:
-    """Execute one engine job and persist status/progress metadata."""
+    '''
+    Execute one engine job and persist status/progress metadata.
+
+    Parameters
+    ----------
+    wildcards : Any
+        Snakemake wildcards object for the current target.
+    rule_input : Any
+        Snakemake input namespace for the engine rule.
+    rule_output : Any
+        Snakemake output namespace for the engine rule.
+    threads_count : int
+        Threads allocated by Snakemake for this rule.
+    engine_name : str
+        Engine identifier for the running rule.
+
+    Returns
+    -------
+    None
+        This function executes the engine and writes status files/DB events.
+    '''
 
     threads_count = _apply_thread_limit_env(int(threads_count))
 
