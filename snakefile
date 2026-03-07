@@ -104,6 +104,14 @@ if not ocdb_path:
 # Python definitions
 ###############################################################################
 
+# Workflow map (high-level):
+# 1) Discover valid targets from selected databases/kinds.
+# 2) Prepare/cache receptor and ligand artifacts once.
+# 3) Run each docking engine into `engine_status/{engine}.json`.
+# 4) Aggregate core results (clustering + non-ODDT rescoring).
+# 5) Run ODDT in isolation and merge into final summary/payload/report.
+# 6) Optionally export one consolidated CSV per database.
+
 cpu_cores = config["cpu_cores"]
 _db_tables_initialized = False
 _db_tables_init_lock = threading.Lock()
@@ -1573,6 +1581,8 @@ def _prepare_cached_receptors_for_receptor(receptor_path):
 
         if not prepared_pdbqt.exists() or prepared_pdbqt.stat().st_size == 0:
             rc = None
+            # Try preparers in configured priority order because some receptors
+            # can fail in one backend but succeed in another.
             pdbqt_preparers = [
                 ("vina", lambda: ocvina.run_prepare_receptor(receptor_path, str(prepared_pdbqt), logFile="", overwrite=overwrite)),
                 ("smina", lambda: ocsmina.run_prepare_receptor(receptor_path, str(prepared_pdbqt), overwrite=overwrite)),
@@ -1583,6 +1593,7 @@ def _prepare_cached_receptors_for_receptor(receptor_path):
                 if prep_name not in pipeline_pdbqt_preparer_priority:
                     continue
                 rc = _normalize_exit_code(prep_fn())
+                # Accept only successful and non-empty artifacts.
                 if rc == 0 and prepared_pdbqt.exists() and prepared_pdbqt.stat().st_size > 0:
                     break
 
@@ -1619,6 +1630,7 @@ def _cache_settings_signature() -> str:
     '''
 
     signature_payload = {
+        # Any change here must invalidate receptor/ligand prep caches.
         "engines": sorted(pipeline_engines_set),
         "rescoring": sorted(pipeline_rescoring_engines_set),
         "requires_pdbqt": pipeline_requires_pdbqt,
@@ -1706,6 +1718,7 @@ def _cache_manifest_is_valid(cache_manifest_path: Union[str, Path], receptor_pat
 
     if stored.get("settings_signature") != current.get("settings_signature"):
         return False
+    # Input receptor fingerprint mismatch means cache is stale.
     if stored.get("receptor") != current.get("receptor"):
         return False
 
@@ -1714,6 +1727,7 @@ def _cache_manifest_is_valid(cache_manifest_path: Union[str, Path], receptor_pat
             continue
         current_prep = current["prepared"].get(required, {})
         stored_prep = stored.get("prepared", {}).get(required, {})
+        # Treat missing/empty prepared files as invalid even if manifest exists.
         if not current_prep.get("exists") or current_prep.get("size", 0) <= 0:
             return False
         if stored_prep != current_prep:
@@ -2627,6 +2641,8 @@ def _prepare_database_mounts() -> None:
                 "Remove it or choose a different database alias."
             )
 
+        # Rules always work under `ocdb_path/<alias>/...`, even when source
+        # databases come from arbitrary external folders.
         mount_path.symlink_to(source_root, target_is_directory=True)
 
 
@@ -3367,6 +3383,11 @@ def collect_payload_targets():
                     ligand_path = target_dir / "ligand.smi"
                     box_path = target_dir / "boxes" / "box0.pdb"
                     has_box = _is_valid_file(box_path)
+                    # A target is considered runnable when it has:
+                    # - receptor.pdb
+                    # - ligand.smi
+                    # - either an explicit box0.pdb or a receptor-level reference ligand
+                    #   (used later to infer box0.pdb automatically).
                     if not _is_valid_file(ligand_path) or (not has_box and not has_reference_ligand):
                         continue
 
@@ -3692,6 +3713,7 @@ def _write_database_results_csv(database: str, payload_paths: List[str], csv_pat
             "Warning: failed to import receptor/ligand descriptor modules for CSV export: "
             f"{type(exc).__name__}: {exc}"
         )
+        # Keep CSV export running even if descriptor modules are unavailable.
 
     receptor_descriptor_columns = [f"receptor_{name}" for name in receptor_descriptor_names]
     ligand_descriptor_columns = [f"ligand_{name}" for name in ligand_descriptor_names]
@@ -3844,6 +3866,7 @@ def _write_database_results_csv(database: str, payload_paths: List[str], csv_pat
         ligand_smi = target_dir / "ligand.smi"
         prepared_ligand_mol2 = target_dir / "prepared_ligand.mol2"
         ligand_candidates: List[Path] = []
+        # Prefer original ligand.mol2, then ligand.smi fallback, then prepared_ligand.mol2.
         for candidate in (ligand_mol2, ligand_smi, prepared_ligand_mol2):
             if candidate.is_file() and candidate not in ligand_candidates:
                 ligand_candidates.append(candidate)
@@ -3851,6 +3874,8 @@ def _write_database_results_csv(database: str, payload_paths: List[str], csv_pat
         receptor_descriptors = _load_receptor_descriptors(receptor_path, receptor_name)
         ligand_descriptors = _load_ligand_descriptors(ligand_candidates, target_name)
 
+        # One CSV row represents one target payload (database/receptor/kind/target).
+        # Descriptor fields can be blank if descriptor generation failed upstream.
         row: Dict[str, Any] = {
             "database": str(payload.get("database", database)),
             "receptor": receptor_name,
@@ -3886,6 +3911,9 @@ def _write_database_results_csv(database: str, payload_paths: List[str], csv_pat
         score for score in _configured_score_columns_for_csv() if score not in excluded_score_columns
     ]
     configured_score_set = set(configured_score_columns)
+    # Keep score columns deterministic:
+    # 1) first, columns from OCDocker.cfg order
+    # 2) then, any extra observed score keys in lexical order
     ordered_score_columns = configured_score_columns + sorted(
         score for score in score_columns if score not in configured_score_set
     )
@@ -4384,6 +4412,7 @@ def _run_oddt_api_for_pose(
         if timeout_seconds > 0:
             ctx = mp.get_context("fork" if hasattr(os, "fork") else "spawn")
             queue = ctx.Queue(maxsize=1)
+            # Run ODDT in a child process so we can enforce hard timeouts.
             process = ctx.Process(
                 target=_run_oddt_api_worker,
                 kwargs={
@@ -4408,6 +4437,7 @@ def _run_oddt_api_for_pose(
                 )
                 return result
 
+            # Worker publishes exactly one parsed payload to the queue.
             completed = queue.get_nowait() if not queue.empty() else None
             queue.close()
             queue.join_thread()
@@ -4926,6 +4956,7 @@ def _run_single_engine_via_api(
     }
     requested_workers = max(1, int(max_workers))
     box_workers = min(len(boxes), requested_workers)
+    # Divide provided CPU budget across concurrent box workers.
     engine_cpu_threads = max(1, requested_workers // box_workers)
 
     def _run_box(box: Path, receptor: Any, ligand: Any) -> Tuple[str, Dict[str, Any]]:
@@ -4993,6 +5024,8 @@ def _run_single_engine_via_api(
             return _run_box(box, isolated_receptor, isolated_ligand)
 
         with ThreadPoolExecutor(max_workers=box_workers) as executor:
+            # Use isolated receptor/ligand objects per task to avoid shared-state
+            # issues inside third-party chemistry libraries.
             future_to_box = {executor.submit(_run_box_isolated, box): box for box in boxes}
             for future in as_completed(future_to_box):
                 box = future_to_box[future]
@@ -5776,6 +5809,7 @@ def _run_engine_job(*, wildcards, rule_input, rule_output, threads_count: int, e
         This function executes the engine and writes status files/DB events.
     '''
 
+    # Propagate Snakemake thread budget to OCDocker/BLAS-related env vars.
     threads_count = _apply_thread_limit_env(int(threads_count))
 
     target_dir = Path(os.path.dirname(str(rule_input.ligand)))
@@ -5804,6 +5838,7 @@ def _run_engine_job(*, wildcards, rule_input, rule_output, threads_count: int, e
         max_workers=threads_count,
     )
 
+    # Each engine writes one stable status JSON that downstream rules consume.
     out_path = Path(str(rule_output.summary))
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
@@ -5972,6 +6007,7 @@ rule run_pipeline_core:
         core_error = ""
 
         try:
+            # Aggregate already-produced engine summaries; no engine execution here.
             rc = _run_pipeline_postprocess_from_summaries(
                 receptor_path=str(input.receptor),
                 ligand_path=str(input.ligand),
@@ -5982,6 +6018,7 @@ rule run_pipeline_core:
                 max_workers=threads_count,
             )
         except Exception as exc:
+            # Reserved code for unexpected crash while aggregating summaries.
             rc = 90
             core_error = f"postprocess crashed: {type(exc).__name__}: {exc}"
 
@@ -5995,6 +6032,7 @@ rule run_pipeline_core:
                     job_name=job_name,
                 )
             except Exception as exc:
+                # Reserved code for missing/invalid summary artifacts.
                 rc = 91
                 core_error = f"summary collection failed: {type(exc).__name__}: {exc}"
 
@@ -6005,6 +6043,8 @@ rule run_pipeline_core:
                 f"Warning: run_pipeline_core marked as failed for "
                 f"{wildcards.database}/{wildcards.receptor}/{wildcards.kind}/{wildcards.target}: {core_error}"
             )
+            # Keep a structured failure payload instead of crashing silently;
+            # this lets downstream diagnosis inspect exactly what failed.
             summary = {
                 "job": job_name,
                 "pipeline_version": pipeline_version,
@@ -6025,6 +6065,7 @@ rule run_pipeline_core:
             "summary_output_path": str(summary_output_path) if summary_output_path else "",
             "per_box_summary_paths": [str(path) for path in per_box_summary_paths],
         }
+        # Always emit the intermediate core summary JSON, even on failures.
         _write_json(output.core_summary, core_payload)
 
 
@@ -6072,6 +6113,8 @@ rule run_oddt:
             "entries": {},
         }
 
+        # This rule is intentionally no-op when ODDT is disabled, but still writes
+        # a status file so finalization has a deterministic input contract.
         if "oddt" not in pipeline_rescoring_engines_set:
             oddt_status["phase"] = "skipped"
             oddt_status["reason"] = "oddt not enabled in pipeline_rescoring_engines"
@@ -6141,7 +6184,9 @@ rule run_oddt:
             for entry in oddt_status["entries"].values()
             if isinstance(entry, dict)
         )
+        # Overall success means at least one box/root ODDT run succeeded.
         oddt_status["phase"] = "completed" if oddt_status["success"] else "failed"
+        # Persist full per-box/per-target ODDT outcomes for downstream merge/debug.
         _write_json(output.oddt_status, oddt_status)
 
 
@@ -6212,6 +6257,7 @@ rule run_pipeline:
 
         representative_pose = summary.get("representative_pose")
         representative_engine = summary.get("representative_engine")
+        # In multi-box mode, keep per-box representative metadata as dicts.
         if representative_pose is None and isinstance(summary.get("box_summaries"), dict):
             representative_pose = {
                 box_name: box_data.get("representative_pose")
@@ -6241,6 +6287,7 @@ rule run_pipeline:
         with open(output.payload, "wb") as handle:
             pickle.dump(payload, handle)
 
+        # Report captures provenance/config/reproducibility metadata for auditing.
         run_report = _generate_run_report(
             job_name=job_name,
             database=wildcards.database,
@@ -6295,6 +6342,7 @@ rule all:
         allkinds=all_payload_targets,
         database_csvs=_collect_database_csv_targets(),
     run:
+        # Keep final message concise for long unattended runs.
         print(
             f"All done! Processed {len(input.allkinds)} entries. "
             f"Database CSV exports: {len(input.database_csvs)}"
