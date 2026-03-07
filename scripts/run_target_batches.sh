@@ -49,6 +49,12 @@ Runner options:
   --conda-env NAME          Run as: conda run -n NAME snakemake
   --cache-root PATH         XDG cache root used for each run (default: /tmp)
   --tmp-root PATH           TMPDIR used for each run (default: /tmp)
+  --snakemake-retries N     Default Snakemake --retries value if not passed
+                            after `--` (default: 3)
+  --continue-on-failed-batch[=BOOL]
+                            Continue after a failed batch (default: true)
+                            BOOL accepts: true/false, 1/0, yes/no
+  --stop-on-failed-batch    Shortcut for --continue-on-failed-batch=false
   --dry-run                 Add -n to each run
   -h, --help                Show this help
 
@@ -86,6 +92,20 @@ USAGE
 is_pos_int() {
     # Helper: strict positive integer checker used by argument validation.
     [[ "${1:-}" =~ ^[1-9][0-9]*$ ]]
+}
+
+is_nonneg_int() {
+    # Helper: zero or positive integer checker.
+    [[ "${1:-}" =~ ^[0-9]+$ ]]
+}
+
+parse_bool() {
+    # Normalize common bool spellings to 1/0.
+    case "${1,,}" in
+        1|true|yes|y|on) echo 1 ;;
+        0|false|no|n|off) echo 0 ;;
+        *) return 1 ;;
+    esac
 }
 
 fail() {
@@ -134,6 +154,8 @@ cache_root="/tmp"
 tmp_root="/tmp"
 dry_run=0
 run_all=0
+snakemake_retries=3
+continue_on_failed_batch=1
 declare -a extra_args=()
 
 # ---------------------------------------------------------------------------
@@ -192,6 +214,32 @@ while [[ $# -gt 0 ]]; do
             tmp_root="$2"
             shift 2
             ;;
+        --snakemake-retries)
+            [[ $# -ge 2 ]] || fail "Missing value for --snakemake-retries"
+            snakemake_retries="$2"
+            shift 2
+            ;;
+        --snakemake-retries=*)
+            snakemake_retries="${1#*=}"
+            shift
+            ;;
+        --continue-on-failed-batch)
+            if [[ $# -ge 2 ]] && [[ ! "$2" =~ ^- ]]; then
+                continue_on_failed_batch="$(parse_bool "$2")" || fail "Invalid bool for --continue-on-failed-batch: $2"
+                shift 2
+            else
+                continue_on_failed_batch=1
+                shift
+            fi
+            ;;
+        --continue-on-failed-batch=*)
+            continue_on_failed_batch="$(parse_bool "${1#*=}")" || fail "Invalid bool for --continue-on-failed-batch: ${1#*=}"
+            shift
+            ;;
+        --stop-on-failed-batch)
+            continue_on_failed_batch=0
+            shift
+            ;;
         --dry-run)
             dry_run=1
             shift
@@ -226,6 +274,7 @@ if [[ -z "$total_batches" && -z "$batch_size" ]]; then
 fi
 
 is_pos_int "$from_idx" || fail "--from must be a positive integer"
+is_nonneg_int "$snakemake_retries" || fail "--snakemake-retries must be a non-negative integer"
 if [[ -n "$to_idx" ]]; then
     is_pos_int "$to_idx" || fail "--to must be a positive integer"
 fi
@@ -298,6 +347,7 @@ export TMPDIR="$tmp_root"
 # prepend --logger snkmt automatically for convenience.
 has_logger=0
 has_logger_snkmt_db=0
+has_retries=0
 for arg in "${extra_args[@]}"; do
     case "$arg" in
         --logger|--logger=*)
@@ -306,11 +356,18 @@ for arg in "${extra_args[@]}"; do
         --logger-snkmt-db|--logger-snkmt-db=*)
             has_logger_snkmt_db=1
             ;;
+        --retries|--retries=*)
+            has_retries=1
+            ;;
     esac
 done
 if (( has_logger_snkmt_db )) && (( ! has_logger )); then
     extra_args=(--logger snkmt "${extra_args[@]}")
     echo "Info: auto-added '--logger snkmt' because '--logger-snkmt-db' was provided."
+fi
+if (( ! has_retries )); then
+    extra_args=(--retries "$snakemake_retries" "${extra_args[@]}")
+    echo "Info: auto-added '--retries ${snakemake_retries}' (use --snakemake-retries or pass --retries after '--' to override)."
 fi
 
 # ---------------------------------------------------------------------------
@@ -318,6 +375,7 @@ fi
 # ---------------------------------------------------------------------------
 echo "Batch runner: mode=${mode}, range=${from_idx}-${to_idx}, snakefile=${snakefile}"
 echo "Runtime paths: XDG_CACHE_HOME=${XDG_CACHE_HOME}, TMPDIR=${TMPDIR}"
+echo "Failure policy: continue_on_failed_batch=${continue_on_failed_batch}"
 if [[ "$mode" == "fixed_size" ]]; then
     echo "Derived batch conversion: total_targets=${total_targets}, batch_size=${batch_size}, total_batches=${total_batches}"
 fi
@@ -333,8 +391,10 @@ fi
 #    Notes:
 #    - We always append `--config pipeline_export_database_csv=false`.
 #      This prevents each partition from depending on a full-database CSV fan-in.
-#    - On first failing batch, stop immediately with non-zero exit.
+#    - Batch failures can either stop immediately or be recorded and skipped,
+#      depending on continue_on_failed_batch.
 # ---------------------------------------------------------------------------
+declare -a failed_batches=()
 for (( idx=from_idx; idx<=to_idx; idx++ )); do
     batch_spec="all=${idx}/${total_batches}"
 
@@ -358,7 +418,12 @@ for (( idx=from_idx; idx<=to_idx; idx++ )); do
     cmd+=(--config "pipeline_export_database_csv=false")
 
     if ! "${cmd[@]}"; then
-        echo "Batch ${idx} failed. Stopping." >&2
+        failed_batches+=("$idx")
+        if (( continue_on_failed_batch )); then
+            echo "Batch ${idx} failed. Continuing to next batch (--continue-on-failed-batch=true)." >&2
+            continue
+        fi
+        echo "Batch ${idx} failed. Stopping (--continue-on-failed-batch=false)." >&2
         exit 1
     fi
 done
@@ -366,5 +431,11 @@ done
 # ---------------------------------------------------------------------------
 # 7) Finished all requested batch indices successfully.
 # ---------------------------------------------------------------------------
+if (( ${#failed_batches[@]} > 0 )); then
+    echo
+    echo "Completed with failed batch(es): ${failed_batches[*]}" >&2
+    exit 1
+fi
+
 echo
 echo "All requested batches finished successfully."
