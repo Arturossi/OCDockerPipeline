@@ -2852,6 +2852,7 @@ def _ensure_target_box_from_reference_ligand(
     target: str,
     ligand_path: Union[str, Path],
     box_path: Union[str, Path],
+    attempt: int = 1,
 ) -> None:
     '''
     Ensure ``boxes/box0.pdb`` exists, generating it from reference-ligand centroid when missing.
@@ -2946,9 +2947,15 @@ def _ensure_target_box_from_reference_ligand(
     ligand_obj = None
     ligand_error: Optional[Exception] = None
     ligand_name = f"{database}_{receptor}_{kind}_{target}"
+    use_smiles_normalization = int(attempt) >= 3
     for sanitize in (True, False):
         try:
-            ligand_obj = ocl.Ligand(str(ligand_path), name=ligand_name, sanitize=sanitize)
+            ligand_obj = ocl.Ligand(
+                str(ligand_path),
+                name=ligand_name,
+                sanitize=sanitize,
+                normalize_smiles_with_openbabel=use_smiles_normalization,
+            )
             break
         except Exception as exc:
             ligand_error = exc
@@ -5743,6 +5750,7 @@ rule prepare_target_box:
             target=wildcards.target,
             ligand_path=str(input.ligand),
             box_path=str(output.box),
+            attempt=int(attempt),
         )
 
 

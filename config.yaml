@@ -63,11 +63,11 @@ pipeline_engine_threads:
   vina: 1
   plants: 1
 
-pipeline_engine_mem_mb_default: 2000
+pipeline_engine_mem_mb_default: 1500
 pipeline_engine_mem_mb:
-  gnina: 2500
-  plants: 2500
-  vina: 2500
+  gnina: 1500
+  plants: 1500
+  vina: 1500
 
 # GPU scheduling for docking jobs.
 # By default Gnina consumes 1 GPU slot; Vina/PLANTS consume 0.
@@ -89,20 +89,18 @@ pipeline_engine_priority:
   vina: 50
 
 # Optional per-engine parallel caps (max concurrent jobs per engine).
-# Suggested values below fit the current mem profile exactly:
-#   6*vina(2GB) + 3*plants(3GB) + 1*gnina(7GB) = 28GB
 pipeline_engine_max_parallel:
-  vina: 6
-  plants: 6
-  gnina: 6
+  vina: 10
+  plants: 10
+  gnina: 10
 
 # Post-processing scheduling (`run_pipeline`)
 pipeline_postprocess_threads: 1
-pipeline_postprocess_mem_mb: 3000
+pipeline_postprocess_mem_mb: 2500
 
 # Dedicated ODDT rule scheduling (`run_oddt`)
 pipeline_oddt_threads: 1
-pipeline_oddt_mem_mb: 3000
+pipeline_oddt_mem_mb: 2000
 # Timeout in seconds for ODDT API rescoring per target (0 disables timeout)
 pipeline_oddt_timeout: 1800
 
