@@ -5750,7 +5750,7 @@ rule prepare_target_box:
             target=wildcards.target,
             ligand_path=str(input.ligand),
             box_path=str(output.box),
-            attempt=int(attempt),
+            attempt=int(getattr(snakemake, "attempt", 1)),
         )
 
 
