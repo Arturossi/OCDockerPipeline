@@ -181,6 +181,125 @@ Notes:
 - `--batch-size` mode converts target count to `all=N/M` using `.snakemake/target_discovery_cache.json` (or `--total-targets` if provided).
 - The helper disables `pipeline_export_database_csv` during batch runs to avoid all-target fan-in on every partition.
 
+### LAN Batch Distribution (Shared Filesystem) - Testing
+
+When all workers share the same filesystem, batches can be distributed across
+multiple machines with the queue helper scripts:
+
+- `scripts/lan_seed_batches.sh`
+- `scripts/lan_worker.sh`
+- `scripts/lan_status.sh`
+- `scripts/lan_requeue_failed.sh`
+
+The queue is filesystem-only. Workers do not send input files to each other.
+Each worker only claims a batch index, then runs:
+
+```bash
+scripts/run_target_batches.sh --total-batches N --from i --to i ...
+```
+
+#### How workers access input files
+
+Workers read inputs directly from the shared dataset paths already used by the
+pipeline:
+
+- `OCDocker.cfg` `ocdb` should point to a shared location visible on every worker.
+- Rules operate under `<ocdb>/<alias>/...`.
+- If `database_sources` contains custom absolute paths, those paths must also
+  exist on every worker.
+- The safest setup is to mount shared storage at the same absolute path on
+  every machine.
+
+Example shared paths:
+
+```text
+/shared/ocdb/PDBbind/<receptor>/receptor.pdb
+/shared/ocdb/PDBbind/<receptor>/compounds/ligands/<target>/ligand.smi
+/shared/ocdb/PDBbind/<receptor>/compounds/ligands/<target>/payload.pkl
+/shared/ocdp-lan-queue/pending/0001.batch
+```
+
+Worker eligibility is not based on IP allowlists. A machine is suitable if it:
+
+- can read and write the same shared queue directory,
+- can read and write the same shared `ocdb` or `database_sources` paths,
+- has the same pipeline code and environment available, and
+- can run a dry-run batch successfully.
+
+Quick host validation:
+
+```bash
+scripts/run_target_batches.sh --total-batches 20 --from 1 --to 1 -- \
+  -n --cores 1 --nolock
+```
+
+If that dry-run works on a host and the shared paths are visible, that host is
+a valid worker.
+
+#### Creating the shared folder
+
+Use any shared filesystem that all workers can mount, for example NFS, SMB, a
+NAS export, or a clustered filesystem. The exact export/mount procedure depends
+on your storage system, but the layout should look like this:
+
+```text
+/shared/ocdb
+/shared/ocdp-lan-queue
+```
+
+Example preparation steps after the shared storage is mounted on each worker at
+the same absolute paths:
+
+```bash
+mkdir -p /shared/ocdb
+mkdir -p /shared/ocdp-lan-queue
+```
+
+Before starting workers, verify that every worker can create and rename files
+in the queue directory, because queue claiming relies on atomic `mv` between
+`pending`, `running`, `done`, and `failed`.
+
+#### Example LAN workflow
+
+1. Point `OCDocker.cfg` `ocdb` to the shared dataset root, for example
+   `/shared/ocdb`.
+2. Make sure every worker mounts the same shared storage at the same paths.
+3. Seed the queue from one machine:
+
+```bash
+scripts/lan_seed_batches.sh \
+  --queue-dir /shared/ocdp-lan-queue \
+  --total-batches 20
+```
+
+4. Start one worker process on each machine:
+
+```bash
+scripts/lan_worker.sh \
+  --queue-dir /shared/ocdp-lan-queue \
+  --worker-id worker01 -- \
+  --cores 16 \
+  --resources mem_mb=28000 \
+  --keep-going \
+  --nolock
+```
+
+5. Monitor or recover the queue:
+
+```bash
+scripts/lan_status.sh --queue-dir /shared/ocdp-lan-queue
+scripts/lan_requeue_failed.sh --queue-dir /shared/ocdp-lan-queue
+```
+
+Important:
+
+- Pass `--nolock` when multiple workers share the same `OCDockerPipeline`
+  working directory, otherwise Snakemake's global workdir lock will prevent
+  concurrent runs.
+- Keep the target set and config stable while workers are running. Changing
+  `database_sources`, `compound_kinds`, or relevant discovery inputs during a
+  LAN run can make batch partitions inconsistent.
+
 Monitoring with snkmt:
 
 ```bash
