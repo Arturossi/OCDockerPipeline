@@ -209,15 +209,36 @@ pipeline:
   exist on every worker.
 - The safest setup is to mount shared storage at the same absolute path on
   every machine.
+- A clean way to organize this is to use a canonical `/shared/...` path on
+  every machine, even if the real data lives somewhere else on the host.
+- The host does not need to mount its own share through the network. It can use
+  local storage plus local symlinks; only the other workers need the network
+  mount.
 
 Example shared paths:
 
 ```text
-/shared/ocdb/PDBbind/<receptor>/receptor.pdb
-/shared/ocdb/PDBbind/<receptor>/compounds/ligands/<target>/ligand.smi
-/shared/ocdb/PDBbind/<receptor>/compounds/ligands/<target>/payload.pkl
+/shared/ocdb2/PDBbind/<receptor>/receptor.pdb
+/shared/ocdb2/PDBbind/<receptor>/compounds/ligands/<target>/ligand.smi
+/shared/ocdb2/PDBbind/<receptor>/compounds/ligands/<target>/payload.pkl
 /shared/ocdp-lan-queue/pending/0001.batch
 ```
+
+Concrete example when the host stores the datasets locally at
+`/data/hd4tb/data/ocdb2`:
+
+- Real host data path: `/data/hd4tb/data/ocdb2`
+- Real host queue path: `/data/hd4tb/data/ocdp-lan-queue`
+- Canonical path used by the pipeline on all machines: `/shared/ocdb2`
+- Canonical queue path used by the LAN helpers on all machines:
+  `/shared/ocdp-lan-queue`
+- On the host, create symlinks:
+  - `/shared/ocdb2 -> /data/hd4tb/data/ocdb2`
+  - `/shared/ocdp-lan-queue -> /data/hd4tb/data/ocdp-lan-queue`
+- On each worker, mount the host export at `/data/hd4tb/data`, then create the
+  same symlinks under `/shared`.
+- `OCDocker.cfg` should use `ocdb=/shared/ocdb2` on every machine.
+- `lan_worker.sh` should use `--queue-dir /shared/ocdp-lan-queue`.
 
 Worker eligibility is not based on IP allowlists. A machine is suitable if it:
 
@@ -239,11 +260,12 @@ a valid worker.
 #### Creating the shared folder
 
 Use any shared filesystem that all workers can mount, for example NFS, SMB, a
-NAS export, or a clustered filesystem. The exact export/mount procedure depends
-on your storage system, but the layout should look like this:
+NAS export, or a clustered filesystem. For Linux-to-Linux workers, NFS is the
+simplest option. The exact export/mount procedure depends on your storage
+system, but the layout should look like this:
 
 ```text
-/shared/ocdb
+/shared/ocdb2
 /shared/ocdp-lan-queue
 ```
 
@@ -251,9 +273,64 @@ Example preparation steps after the shared storage is mounted on each worker at
 the same absolute paths:
 
 ```bash
-mkdir -p /shared/ocdb
-mkdir -p /shared/ocdp-lan-queue
+mkdir -p /shared
 ```
+
+Example using a regular Linux host that already stores data under
+`/data/hd4tb/data/ocdb2`:
+
+```bash
+# On the host: keep the real data where it already lives
+mkdir -p /data/hd4tb/data/ocdp-lan-queue
+mkdir -p /shared
+ln -s /data/hd4tb/data/ocdb2 /shared/ocdb2
+ln -s /data/hd4tb/data/ocdp-lan-queue /shared/ocdp-lan-queue
+
+# Export /data/hd4tb/data with your preferred shared-filesystem method.
+# For Linux-only workers, NFS is the simplest choice.
+#
+# On each worker, mount the host export at the same absolute path:
+mkdir -p /data/hd4tb/data
+mount -t nfs4 <HOSTNAME_OR_IP>:/data/hd4tb/data /data/hd4tb/data
+
+# Then create the same canonical symlinks on each worker:
+mkdir -p /shared
+ln -s /data/hd4tb/data/ocdb2 /shared/ocdb2
+ln -s /data/hd4tb/data/ocdp-lan-queue /shared/ocdp-lan-queue
+```
+
+#### Mapping the folder in Linux
+
+On Linux, "mapping the folder" means mounting the host export so the worker can
+access the remote files as part of its local filesystem.
+
+You may need to install the NFS client package first:
+
+- Debian/Ubuntu: `nfs-common`
+- RHEL/CentOS/Rocky/Alma: `nfs-utils`
+
+Manual mount example:
+
+```bash
+mkdir -p /data/hd4tb/data
+mount -t nfs4 <HOSTNAME_OR_IP>:/data/hd4tb/data /data/hd4tb/data
+```
+
+To make the mount persistent across reboots, add a line like this to
+`/etc/fstab` on each worker:
+
+```fstab
+<HOSTNAME_OR_IP>:/data/hd4tb/data /data/hd4tb/data nfs4 defaults,_netdev 0 0
+```
+
+Then apply it:
+
+```bash
+mount -a
+```
+
+After the mount is active, create the `/shared/...` symlinks shown above so the
+pipeline uses the same clean paths on every machine.
 
 Before starting workers, verify that every worker can create and rename files
 in the queue directory, because queue claiming relies on atomic `mv` between
@@ -261,10 +338,12 @@ in the queue directory, because queue claiming relies on atomic `mv` between
 
 #### Example LAN workflow
 
-1. Point `OCDocker.cfg` `ocdb` to the shared dataset root, for example
-   `/shared/ocdb`.
-2. Make sure every worker mounts the same shared storage at the same paths.
-3. Seed the queue from one machine:
+1. On the host, keep the real dataset at `/data/hd4tb/data/ocdb2` and create
+   the canonical symlink `/shared/ocdb2`.
+2. On every worker, mount the host export at `/data/hd4tb/data`, then create
+   the same `/shared/ocdb2` and `/shared/ocdp-lan-queue` symlinks.
+3. Point `OCDocker.cfg` `ocdb` to `/shared/ocdb2`.
+4. Seed the queue from one machine:
 
 ```bash
 scripts/lan_seed_batches.sh \
@@ -272,7 +351,7 @@ scripts/lan_seed_batches.sh \
   --total-batches 20
 ```
 
-4. Start one worker process on each machine:
+5. Start one worker process on each machine:
 
 ```bash
 scripts/lan_worker.sh \
@@ -284,7 +363,7 @@ scripts/lan_worker.sh \
   --nolock
 ```
 
-5. Monitor or recover the queue:
+6. Monitor or recover the queue:
 
 ```bash
 scripts/lan_status.sh --queue-dir /shared/ocdp-lan-queue
