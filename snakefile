@@ -33,6 +33,7 @@ import socket
 import subprocess
 import sys
 import threading
+import traceback
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
@@ -336,6 +337,99 @@ def _utc_now_iso() -> str:
     '''
 
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _default_pipeline_run_id() -> str:
+    '''Return a filesystem-friendly identifier for the current workflow start.
+
+    Returns
+    -------
+    str
+        UTC timestamp suitable for naming per-run log directories.
+    '''
+
+    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S_%fZ")
+
+
+def _sanitize_run_identifier(value: str) -> str:
+    '''Normalize a run identifier so it is safe in filesystem paths.
+
+    Parameters
+    ----------
+    value : str
+        Raw run identifier candidate.
+
+    Returns
+    -------
+    str
+        Sanitized identifier containing only simple path-safe characters.
+    '''
+
+    cleaned = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value).strip())
+    return cleaned.strip("._") or _default_pipeline_run_id()
+
+
+PIPELINE_RUN_ID = _sanitize_run_identifier(
+    str(config.get("pipeline_run_id") or os.environ.get("OCDP_RUN_ID") or _default_pipeline_run_id())
+)
+PIPELINE_RULE_FAILURE_LOG_DIR = Path(
+    str(config.get("pipeline_rule_failure_log_dir") or (Path("logs") / "rule_failures" / PIPELINE_RUN_ID))
+)
+
+
+def _wildcards_to_dict(wildcards: Any) -> Dict[str, Any]:
+    '''Convert Snakemake wildcards to a plain dictionary when possible.'''
+
+    if wildcards is None:
+        return {}
+    if isinstance(wildcards, dict):
+        return dict(wildcards)
+    try:
+        return dict(wildcards.items())
+    except Exception:
+        return {}
+
+
+def _append_rule_failure_log(
+    log_path: Union[str, Path],
+    rule_name: str,
+    wildcards: Any,
+    exc: BaseException,
+) -> None:
+    '''Append one structured failure entry to a shared per-rule log file.
+
+    Parameters
+    ----------
+    log_path : Union[str, Path]
+        Shared log file for the rule.
+    rule_name : str
+        Snakemake rule name.
+    wildcards : Any
+        Snakemake wildcards for the failed job.
+    exc : BaseException
+        Captured exception.
+    '''
+
+    path = Path(log_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    wildcards_payload = _wildcards_to_dict(wildcards)
+
+    with path.open("a", encoding="utf-8") as handle:
+        if _fcntl is not None:
+            _fcntl.flock(handle.fileno(), _fcntl.LOCK_EX)
+        try:
+            handle.write(f"=== {_utc_now_iso()} {rule_name} run_id={PIPELINE_RUN_ID} ===\n")
+            if wildcards_payload:
+                handle.write(
+                    "wildcards=" + json.dumps(wildcards_payload, sort_keys=True, default=str) + "\n"
+                )
+            handle.write(f"exception={type(exc).__name__}: {exc}\n")
+            traceback.print_exc(file=handle)
+            handle.write("\n")
+            handle.flush()
+        finally:
+            if _fcntl is not None:
+                _fcntl.flock(handle.fileno(), _fcntl.LOCK_UN)
 
 
 def _utc_iso_from_timestamp(value: float) -> str:
@@ -5715,9 +5809,15 @@ rule prepare_receptor_cache:
             "{receptor}",
             f".prepared_receptor_cache.{pipeline_cache_key}.json",
         ),
+    log:
+        str(PIPELINE_RULE_FAILURE_LOG_DIR / "prepare_receptor_cache" / "{database}" / "{receptor}.log"),
     threads: 1
     run:
-        _ensure_receptor_cache_ready(str(input.receptor), str(output.cache))
+        try:
+            _ensure_receptor_cache_ready(str(input.receptor), str(output.cache))
+        except Exception as exc:
+            _append_rule_failure_log(log[0], "prepare_receptor_cache", wildcards, exc)
+            raise
 
 
 rule prepare_target_box:
@@ -5741,17 +5841,30 @@ rule prepare_target_box:
             "boxes",
             "box0.pdb",
         ),
+    log:
+        str(
+            PIPELINE_RULE_FAILURE_LOG_DIR
+            / "prepare_target_box"
+            / "{database}"
+            / "{receptor}"
+            / "{kind}"
+            / "{target}.log"
+        ),
     threads: 1
     run:
-        _ensure_target_box_from_reference_ligand(
-            database=wildcards.database,
-            receptor=wildcards.receptor,
-            kind=wildcards.kind,
-            target=wildcards.target,
-            ligand_path=str(input.ligand),
-            box_path=str(output.box),
-            attempt=int(getattr(snakemake, "attempt", 1)),
-        )
+        try:
+            _ensure_target_box_from_reference_ligand(
+                database=wildcards.database,
+                receptor=wildcards.receptor,
+                kind=wildcards.kind,
+                target=wildcards.target,
+                ligand_path=str(input.ligand),
+                box_path=str(output.box),
+                attempt=int(getattr(snakemake, "attempt", 1)),
+            )
+        except Exception as exc:
+            _append_rule_failure_log(log[0], "prepare_target_box", wildcards, exc)
+            raise
 
 
 rule prepare_ligand_cache:
@@ -5776,23 +5889,36 @@ rule prepare_ligand_cache:
             "{target}",
             f".prepared_ligand_cache.{pipeline_cache_key}.json",
         ),
+    log:
+        str(
+            PIPELINE_RULE_FAILURE_LOG_DIR
+            / "prepare_ligand_cache"
+            / "{database}"
+            / "{receptor}"
+            / "{kind}"
+            / "{target}.log"
+        ),
     threads: 1
     run:
-        target_dir = Path(os.path.dirname(input.ligand))
-        target_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            target_dir = Path(os.path.dirname(input.ligand))
+            target_dir.mkdir(parents=True, exist_ok=True)
 
-        if not _cached_receptor_files_present(str(input.receptor)):
-            _ensure_receptor_cache_ready(str(input.receptor), str(input.receptor_cache))
+            if not _cached_receptor_files_present(str(input.receptor)):
+                _ensure_receptor_cache_ready(str(input.receptor), str(input.receptor_cache))
 
-        job_name = f"{wildcards.database}_{wildcards.receptor}_{wildcards.kind}_{wildcards.target}"
-        _ensure_ligand_cache_ready(
-            receptor_path=str(input.receptor),
-            ligand_path=str(input.ligand),
-            box_path=str(input.box),
-            target_dir=str(target_dir),
-            cache_manifest_path=str(output.cache),
-            job_name=job_name,
-        )
+            job_name = f"{wildcards.database}_{wildcards.receptor}_{wildcards.kind}_{wildcards.target}"
+            _ensure_ligand_cache_ready(
+                receptor_path=str(input.receptor),
+                ligand_path=str(input.ligand),
+                box_path=str(input.box),
+                target_dir=str(target_dir),
+                cache_manifest_path=str(output.cache),
+                job_name=job_name,
+            )
+        except Exception as exc:
+            _append_rule_failure_log(log[0], "prepare_ligand_cache", wildcards, exc)
+            raise
 
 
 def _run_engine_job(*, wildcards, rule_input, rule_output, threads_count: int, engine_name: str) -> None:
@@ -6230,92 +6356,105 @@ rule run_pipeline:
             "{target}",
             "run_report.json",
         ),
+    log:
+        str(
+            PIPELINE_RULE_FAILURE_LOG_DIR
+            / "run_pipeline"
+            / "{database}"
+            / "{receptor}"
+            / "{kind}"
+            / "{target}.log"
+        ),
     threads: 1
     resources:
         mem_mb=pipeline_postprocess_mem_mb
     run:
-        target_dir = Path(os.path.dirname(input.ligand))
-        target_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            target_dir = Path(os.path.dirname(input.ligand))
+            target_dir.mkdir(parents=True, exist_ok=True)
 
-        job_name = f"{wildcards.database}_{wildcards.receptor}_{wildcards.kind}_{wildcards.target}"
-        if not _cached_receptor_files_present(str(input.receptor)):
-            _ensure_receptor_cache_ready(str(input.receptor), str(input.receptor_cache))
+            job_name = f"{wildcards.database}_{wildcards.receptor}_{wildcards.kind}_{wildcards.target}"
+            if not _cached_receptor_files_present(str(input.receptor)):
+                _ensure_receptor_cache_ready(str(input.receptor), str(input.receptor_cache))
 
-        with Path(str(input.core_summary)).open("r", encoding="utf-8") as handle:
-            core_payload = json.load(handle)
-        summary = core_payload.get("summary", {})
-        if not isinstance(summary, dict):
-            raise RuntimeError(f"Invalid core summary payload at {input.core_summary}")
+            with Path(str(input.core_summary)).open("r", encoding="utf-8") as handle:
+                core_payload = json.load(handle)
+            summary = core_payload.get("summary", {})
+            if not isinstance(summary, dict):
+                raise RuntimeError(f"Invalid core summary payload at {input.core_summary}")
 
-        summary_output_path_raw = str(core_payload.get("summary_output_path", "") or "").strip()
-        summary_output_path: Optional[Path] = Path(summary_output_path_raw) if summary_output_path_raw else None
-        per_box_summary_paths = [Path(str(path)) for path in core_payload.get("per_box_summary_paths", []) if str(path).strip()]
+            summary_output_path_raw = str(core_payload.get("summary_output_path", "") or "").strip()
+            summary_output_path: Optional[Path] = Path(summary_output_path_raw) if summary_output_path_raw else None
+            per_box_summary_paths = [Path(str(path)) for path in core_payload.get("per_box_summary_paths", []) if str(path).strip()]
 
-        oddt_status: Dict[str, Any] = {}
-        oddt_status_path = Path(str(input.oddt_status))
-        if oddt_status_path.is_file():
-            with oddt_status_path.open("r", encoding="utf-8") as handle:
-                loaded_status = json.load(handle)
-            if isinstance(loaded_status, dict):
-                oddt_status = loaded_status
-        # Merge ODDT scores/status into the summary generated in core stage.
-        summary = _apply_oddt_status_to_summary(summary, oddt_status)
+            oddt_status: Dict[str, Any] = {}
+            oddt_status_path = Path(str(input.oddt_status))
+            if oddt_status_path.is_file():
+                with oddt_status_path.open("r", encoding="utf-8") as handle:
+                    loaded_status = json.load(handle)
+                if isinstance(loaded_status, dict):
+                    oddt_status = loaded_status
+            # Merge ODDT scores/status into the summary generated in core stage.
+            summary = _apply_oddt_status_to_summary(summary, oddt_status)
 
-        if summary_output_path is not None:
-            _write_json(summary_output_path, summary)
+            if summary_output_path is not None:
+                _write_json(summary_output_path, summary)
 
-        representative_pose = summary.get("representative_pose")
-        representative_engine = summary.get("representative_engine")
-        # In multi-box mode, keep per-box representative metadata as dicts.
-        if representative_pose is None and isinstance(summary.get("box_summaries"), dict):
-            representative_pose = {
-                box_name: box_data.get("representative_pose")
-                for box_name, box_data in summary["box_summaries"].items()
-                if isinstance(box_data, dict)
+            representative_pose = summary.get("representative_pose")
+            representative_engine = summary.get("representative_engine")
+            # In multi-box mode, keep per-box representative metadata as dicts.
+            if representative_pose is None and isinstance(summary.get("box_summaries"), dict):
+                representative_pose = {
+                    box_name: box_data.get("representative_pose")
+                    for box_name, box_data in summary["box_summaries"].items()
+                    if isinstance(box_data, dict)
+                }
+            if representative_engine is None and isinstance(summary.get("box_summaries"), dict):
+                representative_engine = {
+                    box_name: box_data.get("representative_engine")
+                    for box_name, box_data in summary["box_summaries"].items()
+                    if isinstance(box_data, dict)
+                }
+
+            payload = {
+                "name": str(summary.get("job", job_name)),
+                "pipeline_version": summary.get("pipeline_version", pipeline_version),
+                "database": wildcards.database,
+                "receptor": wildcards.receptor,
+                "kind": wildcards.kind,
+                "target": wildcards.target,
+                "representative_pose": representative_pose,
+                "representative_engine": representative_engine,
+                "run_report": str(output.run_report),
+                "summary": summary,
             }
-        if representative_engine is None and isinstance(summary.get("box_summaries"), dict):
-            representative_engine = {
-                box_name: box_data.get("representative_engine")
-                for box_name, box_data in summary["box_summaries"].items()
-                if isinstance(box_data, dict)
-            }
 
-        payload = {
-            "name": str(summary.get("job", job_name)),
-            "pipeline_version": summary.get("pipeline_version", pipeline_version),
-            "database": wildcards.database,
-            "receptor": wildcards.receptor,
-            "kind": wildcards.kind,
-            "target": wildcards.target,
-            "representative_pose": representative_pose,
-            "representative_engine": representative_engine,
-            "run_report": str(output.run_report),
-            "summary": summary,
-        }
+            with open(output.payload, "wb") as handle:
+                pickle.dump(payload, handle)
 
-        with open(output.payload, "wb") as handle:
-            pickle.dump(payload, handle)
-
-        # Report captures provenance/config/reproducibility metadata for auditing.
-        run_report = _generate_run_report(
-            job_name=job_name,
-            database=wildcards.database,
-            receptor=wildcards.receptor,
-            kind=wildcards.kind,
-            target=wildcards.target,
-            receptor_path=str(input.receptor),
-            ligand_path=str(input.ligand),
-            box_path=str(input.box),
-            engine_summary_paths=list(input.engine_summaries),
-            summary=summary,
-            summary_path=summary_output_path,
-            per_box_summary_paths=[str(path) for path in per_box_summary_paths],
-            payload_path=str(output.payload),
-            report_path=str(output.run_report),
-        )
-        report_path = Path(str(output.run_report))
-        report_path.parent.mkdir(parents=True, exist_ok=True)
-        report_path.write_text(json.dumps(run_report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            # Report captures provenance/config/reproducibility metadata for auditing.
+            run_report = _generate_run_report(
+                job_name=job_name,
+                database=wildcards.database,
+                receptor=wildcards.receptor,
+                kind=wildcards.kind,
+                target=wildcards.target,
+                receptor_path=str(input.receptor),
+                ligand_path=str(input.ligand),
+                box_path=str(input.box),
+                engine_summary_paths=list(input.engine_summaries),
+                summary=summary,
+                summary_path=summary_output_path,
+                per_box_summary_paths=[str(path) for path in per_box_summary_paths],
+                payload_path=str(output.payload),
+                report_path=str(output.run_report),
+            )
+            report_path = Path(str(output.run_report))
+            report_path.parent.mkdir(parents=True, exist_ok=True)
+            report_path.write_text(json.dumps(run_report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        except Exception as exc:
+            _append_rule_failure_log(log[0], "run_pipeline", wildcards, exc)
+            raise
 
 
 rule export_database_csv:
@@ -6330,13 +6469,19 @@ rule export_database_csv:
             "{database}",
             "pipeline_results.csv",
         ),
+    log:
+        str(PIPELINE_RULE_FAILURE_LOG_DIR / "export_database_csv" / "{database}.log"),
     threads: 1
     run:
-        _write_database_results_csv(
-            database=wildcards.database,
-            payload_paths=list(input.payloads),
-            csv_path=str(output.csv),
-        )
+        try:
+            _write_database_results_csv(
+                database=wildcards.database,
+                payload_paths=list(input.payloads),
+                csv_path=str(output.csv),
+            )
+        except Exception as exc:
+            _append_rule_failure_log(log[0], "export_database_csv", wildcards, exc)
+            raise
 
 
 rule all:

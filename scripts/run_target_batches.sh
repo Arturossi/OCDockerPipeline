@@ -20,6 +20,9 @@ set -euo pipefail
 # shellcheck disable=SC2034
 # SC2034 note: some variables are intentionally initialized and conditionally used.
 
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+repo_root="$(cd -- "${script_dir}/.." && pwd -P)"
+
 usage() {
     cat <<'USAGE'
 Run OCDockerPipeline in batches via native Snakemake --batch on rule `all`.
@@ -73,16 +76,29 @@ Examples:
 
 Complete example:
 
-  # Set up logging for a full fixed-size run with conda environment. Logs will be written to a timestamped file in logs/.
-  LOG="logs/pipeline_all_batches_$(date +%F_%H-%M-%S).log"
+  # Set up a stable run identifier and a matching top-level log file.
+  RUN_ID="batches_$(date -u +%Y%m%dT%H%M%SZ)"
+  LOG="logs/pipeline_all_batches_${RUN_ID}.log"
 
-  # Run the pipeline with nohup, logging, using a batch size of 500 and all derived batches, within the 'ocdocker' conda environment. Adjust Snakemake args as needed.
-  nohup env XDG_CACHE_HOME=/tmp TMPDIR=/tmp ./scripts/run_target_batches.sh \
-    --batch-size 500 --all --conda-env ocdocker -- \
+  # Run the pipeline with nohup, exporting OCDP_RUN_ID so all batch invocations
+  # launched by this wrapper share one logical run identifier.
+  nohup env \
+    XDG_CACHE_HOME=/tmp \
+    TMPDIR=/tmp \
+    OCDP_RUN_ID="$RUN_ID" \
+    ./scripts/run_target_batches.sh \
+    --snakefile snakefile \
+    --batch-size 500 \
+    --all \
+    --conda-env ocdocker \
+    -- \
     --logger snkmt \
     --logger-snkmt-db /data/hd4tb/OCDocker/OCDockerPipeline/.snakemake/snkmt.db \
-    --cores 18 --resources mem_mb=28000 --keep-going \
-    --rerun-incomplete --rerun-triggers mtime \
+    --cores 18 \
+    --resources mem_mb=28000 \
+    --keep-going \
+    --rerun-incomplete \
+    --rerun-triggers mtime \
     > "$LOG" 2>&1 &
 
 echo "Started. Tail with: tail -f $LOG"
@@ -112,6 +128,35 @@ fail() {
     # Consistent fatal error helper.
     echo "Error: $*" >&2
     exit 2
+}
+
+cleanup_empty_rule_failure_logs() {
+    # Snakemake touches declared log files even when a rule never writes to them.
+    # Prune zero-byte failure logs after each batch to avoid inode buildup.
+    local run_id="${OCDP_RUN_ID:-}"
+    local root=""
+    local before=0
+    local after=0
+    local removed=0
+
+    [[ -n "$run_id" ]] || return 0
+
+    root="${repo_root}/logs/rule_failures/${run_id}"
+    [[ -d "$root" ]] || return 0
+
+    before="$(find "$root" -type f -empty -name '*.log' | wc -l)"
+
+    find "$root" -type f -empty -name '*.log' -delete
+    find "$root" -depth -type d -empty -delete
+
+    if [[ -d "$root" ]]; then
+        after="$(find "$root" -type f -empty -name '*.log' | wc -l)"
+    fi
+
+    removed=$(( before - after ))
+    if (( removed > 0 )); then
+        echo "Info: pruned ${removed} empty rule failure log(s) under ${root}"
+    fi
 }
 
 infer_total_targets_from_cache() {
@@ -417,7 +462,16 @@ for (( idx=from_idx; idx<=to_idx; idx++ )); do
     # user-provided --config cannot re-enable CSV export accidentally.
     cmd+=(--config "pipeline_export_database_csv=false")
 
-    if ! "${cmd[@]}"; then
+    batch_rc=0
+    if "${cmd[@]}"; then
+        batch_rc=0
+    else
+        batch_rc=$?
+    fi
+
+    cleanup_empty_rule_failure_logs
+
+    if (( batch_rc != 0 )); then
         failed_batches+=("$idx")
         if (( continue_on_failed_batch )); then
             echo "Batch ${idx} failed. Continuing to next batch (--continue-on-failed-batch=true)." >&2
