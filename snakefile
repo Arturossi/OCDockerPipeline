@@ -5811,6 +5811,7 @@ rule prepare_receptor_cache:
         ),
     log:
         str(PIPELINE_RULE_FAILURE_LOG_DIR / "prepare_receptor_cache" / "{database}" / "{receptor}.log"),
+    priority: 140
     threads: 1
     run:
         try:
@@ -5850,6 +5851,7 @@ rule prepare_target_box:
             / "{kind}"
             / "{target}.log"
         ),
+    priority: 130
     threads: 1
     run:
         try:
@@ -5898,6 +5900,7 @@ rule prepare_ligand_cache:
             / "{kind}"
             / "{target}.log"
         ),
+    priority: 125
     threads: 1
     run:
         try:
@@ -6012,7 +6015,7 @@ rule run_engine_vina:
             "vina.json",
         ),
     threads: _engine_threads("vina")
-    priority: _engine_priority("vina")
+    priority: 90
     resources:
         mem_mb=_engine_mem_mb("vina"),
         gpu=_engine_gpu("vina"),
@@ -6048,7 +6051,7 @@ rule run_engine_gnina:
             "gnina.json",
         ),
     threads: _engine_threads("gnina")
-    priority: _engine_priority("gnina")
+    priority: 100
     resources:
         mem_mb=_engine_mem_mb("gnina"),
         gpu=_engine_gpu("gnina"),
@@ -6084,7 +6087,7 @@ rule run_engine_plants:
             "plants.json",
         ),
     threads: _engine_threads("plants")
-    priority: _engine_priority("plants")
+    priority: 90
     resources:
         mem_mb=_engine_mem_mb("plants"),
         gpu=_engine_gpu("plants"),
@@ -6126,6 +6129,7 @@ rule run_pipeline_core:
             "{target}",
             "pipeline_core_summary.json",
         ),
+    priority: 110
     threads: pipeline_postprocess_threads
     resources:
         mem_mb=pipeline_postprocess_mem_mb
@@ -6222,6 +6226,7 @@ rule run_oddt:
             "{target}",
             "oddt_status.json",
         ),
+    priority: 115
     threads: pipeline_oddt_threads
     resources:
         mem_mb=pipeline_oddt_mem_mb
@@ -6365,6 +6370,7 @@ rule run_pipeline:
             / "{kind}"
             / "{target}.log"
         ),
+    priority: 120
     threads: 1
     resources:
         mem_mb=pipeline_postprocess_mem_mb
@@ -6471,6 +6477,7 @@ rule export_database_csv:
         ),
     log:
         str(PIPELINE_RULE_FAILURE_LOG_DIR / "export_database_csv" / "{database}.log"),
+    priority: 10
     threads: 1
     run:
         try:
