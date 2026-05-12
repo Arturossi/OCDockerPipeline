@@ -2,7 +2,7 @@
 # Batch launcher for OCDockerPipeline/Snakemake.
 #
 # What this script does:
-# - Splits the global `rule all` target set into Snakemake native `--batch all=i/N` partitions.
+# - Splits the global `rule all` target set via Snakefile-level batch config.
 # - Runs one or many batch indices sequentially.
 # - Propagates user Snakemake args after `--`.
 # - Forces `pipeline_export_database_csv=false` during batch runs so each partition stays local.
@@ -25,13 +25,13 @@ repo_root="$(cd -- "${script_dir}/.." && pwd -P)"
 
 usage() {
     cat <<'USAGE'
-Run OCDockerPipeline in batches via native Snakemake --batch on rule `all`.
+Run OCDockerPipeline in batches via Snakefile-level rule `all` target slicing.
 
 Usage:
   scripts/run_target_batches.sh [batch mode options] [runner options] -- [snakemake args...]
 
 Batch mode (pick exactly one):
-  --total-batches N         Fractional mode (runs all=1/N, 2/N, ...)
+  --total-batches N         Fractional mode (runs batch 1/N, 2/N, ...)
   --batch-size N            Approximate fixed-size mode (derives total batches)
 
 Batch range:
@@ -482,7 +482,8 @@ fi
 mode=""
 if [[ -n "$total_batches" ]]; then
     # Fractional mode:
-    # User already defines N batches. We run all=i/N.
+    # User already defines N batches. We run pipeline_batch_index=i
+    # with pipeline_total_batches=N.
     mode="fraction"
     is_pos_int "$total_batches" || fail "--total-batches must be a positive integer"
     if [[ -z "$to_idx" ]]; then
@@ -549,7 +550,20 @@ export TMPDIR="$tmp_root"
 has_logger=0
 has_logger_snkmt_db=0
 has_retries=0
+declare -a normalized_extra_args=()
+skip_rerun_trigger_values=0
 for arg in "${extra_args[@]}"; do
+    if (( skip_rerun_trigger_values )); then
+        case "$arg" in
+            code|input|mtime|params|software-env)
+                continue
+                ;;
+            *)
+                skip_rerun_trigger_values=0
+                ;;
+        esac
+    fi
+
     case "$arg" in
         --logger|--logger=*)
             has_logger=1
@@ -560,8 +574,23 @@ for arg in "${extra_args[@]}"; do
         --retries|--retries=*)
             has_retries=1
             ;;
+        --rerun-incomplete|--ri)
+            echo "Info: removed '${arg}' so existing outputs are not rerun only because they are marked incomplete."
+            continue
+            ;;
+        --rerun-triggers)
+            echo "Info: replaced user-provided '--rerun-triggers ...' with an empty trigger list."
+            skip_rerun_trigger_values=1
+            continue
+            ;;
+        --rerun-triggers=*)
+            echo "Info: replaced user-provided '${arg}' with an empty trigger list."
+            continue
+            ;;
     esac
+    normalized_extra_args+=("$arg")
 done
+extra_args=("${normalized_extra_args[@]}")
 if (( has_logger_snkmt_db )) && (( ! has_logger )); then
     extra_args=(--logger snkmt "${extra_args[@]}")
     echo "Info: auto-added '--logger snkmt' because '--logger-snkmt-db' was provided."
@@ -570,6 +599,8 @@ if (( ! has_retries )); then
     extra_args=(--retries "$snakemake_retries" "${extra_args[@]}")
     echo "Info: auto-added '--retries ${snakemake_retries}' (use --snakemake-retries or pass --retries after '--' to override)."
 fi
+extra_args+=(--ignore-incomplete --rerun-triggers software-env)
+echo "Info: using '--ignore-incomplete --rerun-triggers software-env'; existing outputs are not rerun because inputs/code/params are newer."
 
 # ---------------------------------------------------------------------------
 # 5) User-facing run summary before execution starts.
@@ -587,7 +618,7 @@ fi
 # ---------------------------------------------------------------------------
 # 6) Sequential batch execution loop.
 #    Each iteration launches one Snakemake process:
-#      snakemake -s <snakefile> --batch all=i/N [forwarded args...]
+#      snakemake -s <snakefile> --config pipeline_batch_index=i pipeline_total_batches=N [forwarded args...]
 #
 #    Notes:
 #    - We always append `--config pipeline_export_database_csv=false`.
@@ -597,15 +628,12 @@ fi
 # ---------------------------------------------------------------------------
 declare -a failed_batches=()
 for (( idx=from_idx; idx<=to_idx; idx++ )); do
-    batch_spec="all=${idx}/${total_batches}"
-
     echo
-    echo "=== Running batch ${idx} (${batch_spec}) ($(date '+%Y-%m-%d %H:%M:%S')) ==="
+    echo "=== Running batch ${idx}/${total_batches} ($(date '+%Y-%m-%d %H:%M:%S')) ==="
 
     declare -a cmd=(
         "${snakemake_cmd[@]}"
         -s "$snakefile"
-        --batch "$batch_spec"
     )
     if (( dry_run )); then
         cmd+=(-n)
@@ -613,6 +641,11 @@ for (( idx=from_idx; idx<=to_idx; idx++ )); do
     if [[ ${#extra_args[@]} -gt 0 ]]; then
         cmd+=("${extra_args[@]}")
     fi
+    cmd+=(
+        --config
+        "pipeline_batch_index=${idx}"
+        "pipeline_total_batches=${total_batches}"
+    )
     # Disable per-database CSV export in batch runs to avoid all-target fan-in
     # dependencies being reintroduced for each partition. Append it last so a
     # user-provided --config cannot re-enable CSV export accidentally.

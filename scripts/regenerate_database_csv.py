@@ -26,10 +26,21 @@ try:
 except Exception as exc:  # pragma: no cover - environment issue
     raise SystemExit(f"PyYAML is required to run this script: {type(exc).__name__}: {exc}")
 
+try:
+    from tqdm.auto import tqdm as _tqdm
+except Exception:  # pragma: no cover - optional dependency
+    _tqdm = None
+
 
 os.environ.setdefault("OCDOCKER_NO_AUTO_BOOTSTRAP", "1")
 
 _PRESET_DATABASES = {"PDBbind", "DUDEz"}
+
+
+def _progress(iterable: Any, **kwargs: Any) -> Any:
+    if _tqdm is None:
+        return iterable
+    return _tqdm(iterable, **kwargs)
 
 
 def _as_bool(value: Any, default: bool = False) -> bool:
@@ -234,6 +245,31 @@ def _collect_numeric_descriptors(obj: Any, descriptor_names: List[str]) -> Dict[
         for attr_name in _descriptor_attribute_candidates(descriptor):
             if hasattr(obj, attr_name):
                 raw_value = getattr(obj, attr_name)
+                found = True
+                break
+        if not found:
+            continue
+        numeric_value = _to_numeric(raw_value)
+        if numeric_value is None:
+            continue
+        if _is_integer_descriptor_name(descriptor):
+            payload[descriptor] = int(numeric_value)
+        else:
+            payload[descriptor] = numeric_value
+    return payload
+
+
+def _collect_numeric_descriptors_from_mapping(
+    data: Dict[str, Any],
+    descriptor_names: List[str],
+) -> Dict[str, Union[int, float]]:
+    payload: Dict[str, Union[int, float]] = {}
+    for descriptor in descriptor_names:
+        raw_value: Any = None
+        found = False
+        for key in _descriptor_attribute_candidates(descriptor):
+            if key in data:
+                raw_value = data[key]
                 found = True
                 break
         if not found:
@@ -455,61 +491,120 @@ def _collect_existing_payloads_for_database(
     return sorted(set(payloads))
 
 
-def _write_database_results_csv(
-    *,
-    database: str,
-    payload_paths: Sequence[str],
-    csv_path: Union[str, Path],
-    oc_config: Any,
-) -> int:
-    output_path = Path(csv_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
+def _candidate_ligand_paths(target_dir: Path) -> List[Path]:
+    ligand_candidates: List[Path] = []
+    for candidate in (
+        target_dir / "ligand.mol2",
+        target_dir / "ligand.smi",
+        target_dir / "prepared_ligand.mol2",
+    ):
+        if candidate.is_file() and candidate not in ligand_candidates:
+            ligand_candidates.append(candidate)
+    return ligand_candidates
 
-    receptor_descriptor_names: List[str] = []
-    ligand_descriptor_names: List[str] = []
-    receptor_module = None
-    ligand_module = None
-    try:
-        import OCDocker.Receptor as ocr
-        import OCDocker.Ligand as ocl
 
-        receptor_module = ocr
-        ligand_module = ocl
-        receptor_descriptor_names = list(getattr(ocr.Receptor, "allDescriptors", []))
-        ligand_descriptor_names = list(getattr(ocl.Ligand, "allDescriptors", []))
-    except Exception as exc:
-        print(
-            "Warning: failed to import receptor/ligand descriptor modules for CSV export: "
-            f"{type(exc).__name__}: {exc}",
-            file=sys.stderr,
-        )
-
-    receptor_descriptor_columns = [f"receptor_{name}" for name in receptor_descriptor_names]
-    ligand_descriptor_columns = [f"ligand_{name}" for name in ligand_descriptor_names]
-
-    receptor_descriptor_cache: Dict[str, Dict[str, Union[int, float]]] = {}
-    ligand_descriptor_cache: Dict[str, Dict[str, Union[int, float]]] = {}
-
-    def _load_receptor_descriptors(receptor_path: Path, receptor_name: str) -> Dict[str, Union[int, float]]:
-        cache_key = str(receptor_path.resolve())
-        if cache_key in receptor_descriptor_cache:
-            return receptor_descriptor_cache[cache_key]
-
-        if receptor_module is None or not receptor_path.is_file():
-            receptor_descriptor_cache[cache_key] = {}
-            return receptor_descriptor_cache[cache_key]
-
-        descriptor_json = receptor_path.with_name("receptor_descriptors.json")
-        kwargs: Dict[str, Any] = {
-            "name": f"{receptor_name}_csv_receptor",
-            "allow_missing_surface": True,
-        }
-        if descriptor_json.is_file():
-            kwargs["from_json_descriptors"] = str(descriptor_json)
+class _DescriptorResolver:
+    def __init__(self, *, save_json_descriptor: bool = False) -> None:
+        self.save_json_descriptor = save_json_descriptor
+        self.receptor_descriptor_names: List[str] = []
+        self.ligand_descriptor_names: List[str] = []
+        self.receptor_module = None
+        self.ligand_module = None
+        self.receptor_json_loader = None
+        self.ligand_json_loader = None
+        self.receptor_descriptor_cache: Dict[str, Dict[str, Union[int, float]]] = {}
+        self.ligand_descriptor_cache: Dict[str, Dict[str, Union[int, float]]] = {}
 
         try:
-            receptor_obj = receptor_module.Receptor(str(receptor_path), **kwargs)
-            payload = _collect_numeric_descriptors(receptor_obj, receptor_descriptor_names)
+            import OCDocker.Receptor as ocr
+            import OCDocker.Ligand as ocl
+
+            self.receptor_module = ocr
+            self.ligand_module = ocl
+            self.receptor_json_loader = getattr(ocr, "read_descriptors_from_json", None)
+            self.ligand_json_loader = getattr(ocl, "read_descriptors_from_json", None)
+            self.receptor_descriptor_names = list(getattr(ocr.Receptor, "allDescriptors", []))
+            self.ligand_descriptor_names = list(getattr(ocl.Ligand, "allDescriptors", []))
+        except Exception as exc:
+            print(
+                "Warning: failed to import receptor/ligand descriptor modules for CSV export: "
+                f"{type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
+
+    def _load_descriptor_payload_from_json(
+        self,
+        descriptor_json: Path,
+        descriptor_names: List[str],
+        loader: Any,
+        label: str,
+    ) -> Dict[str, Union[int, float]]:
+        if loader is None or not descriptor_json.is_file():
+            return {}
+
+        try:
+            if label == "receptor":
+                raw_payload = loader(str(descriptor_json), returnData=True)
+            else:
+                raw_payload = loader(str(descriptor_json), return_data=True)
+        except Exception as exc:
+            print(
+                f"Warning: failed to read {label} descriptor json '{descriptor_json}': "
+                f"{type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
+            return {}
+
+        if not isinstance(raw_payload, dict):
+            return {}
+
+        return _collect_numeric_descriptors_from_mapping(raw_payload, descriptor_names)
+
+    def load_receptor_descriptors(self, receptor_path: Path, receptor_name: str) -> Dict[str, Union[int, float]]:
+        cache_key = str(receptor_path.resolve())
+        if cache_key in self.receptor_descriptor_cache:
+            return self.receptor_descriptor_cache[cache_key]
+
+        if self.receptor_module is None or not receptor_path.is_file():
+            self.receptor_descriptor_cache[cache_key] = {}
+            return self.receptor_descriptor_cache[cache_key]
+
+        descriptor_json = receptor_path.with_name("receptor_descriptors.json")
+        if self.save_json_descriptor:
+            payload = self._load_descriptor_payload_from_json(
+                descriptor_json,
+                self.receptor_descriptor_names,
+                self.receptor_json_loader,
+                "receptor",
+            )
+            if payload:
+                self.receptor_descriptor_cache[cache_key] = payload
+                return payload
+
+            kwargs: Dict[str, Any] = {
+                "name": "receptor",
+                "allow_missing_surface": True,
+            }
+        else:
+            kwargs = {
+                "name": f"{receptor_name}_csv_receptor",
+                "allow_missing_surface": True,
+            }
+            if descriptor_json.is_file():
+                kwargs["from_json_descriptors"] = str(descriptor_json)
+
+        try:
+            receptor_obj = self.receptor_module.Receptor(str(receptor_path), **kwargs)
+            payload = _collect_numeric_descriptors(receptor_obj, self.receptor_descriptor_names)
+            if self.save_json_descriptor and hasattr(receptor_obj, "to_json"):
+                try:
+                    receptor_obj.to_json(overwrite=descriptor_json.is_file())
+                except Exception as exc:
+                    print(
+                        f"Warning: failed to persist receptor descriptor json '{descriptor_json}': "
+                        f"{type(exc).__name__}: {exc}",
+                        file=sys.stderr,
+                    )
         except Exception as exc:
             print(
                 f"Warning: failed to compute receptor descriptors for '{receptor_path}': "
@@ -518,11 +613,11 @@ def _write_database_results_csv(
             )
             payload = {}
 
-        receptor_descriptor_cache[cache_key] = payload
+        self.receptor_descriptor_cache[cache_key] = payload
         return payload
 
-    def _load_ligand_descriptors(ligand_paths: Sequence[Path], target_name: str) -> Dict[str, Union[int, float]]:
-        if ligand_module is None:
+    def load_ligand_descriptors(self, ligand_paths: Sequence[Path], target_name: str) -> Dict[str, Union[int, float]]:
+        if self.ligand_module is None:
             return {}
 
         for ligand_path in ligand_paths:
@@ -530,20 +625,42 @@ def _write_database_results_csv(
                 continue
 
             cache_key = str(ligand_path.resolve())
-            if cache_key in ligand_descriptor_cache:
-                cached = ligand_descriptor_cache[cache_key]
+            if cache_key in self.ligand_descriptor_cache:
+                cached = self.ligand_descriptor_cache[cache_key]
                 if cached:
                     return cached
                 continue
 
             descriptor_json = ligand_path.parent / "ligand_descriptors.json"
-            kwargs: Dict[str, Any] = {"name": f"{target_name}_csv_ligand"}
-            if descriptor_json.is_file():
-                kwargs["from_json_descriptors"] = str(descriptor_json)
+            if self.save_json_descriptor:
+                payload = self._load_descriptor_payload_from_json(
+                    descriptor_json,
+                    self.ligand_descriptor_names,
+                    self.ligand_json_loader,
+                    "ligand",
+                )
+                if payload:
+                    self.ligand_descriptor_cache[cache_key] = payload
+                    return payload
+
+                kwargs: Dict[str, Any] = {"name": "ligand"}
+            else:
+                kwargs = {"name": f"{target_name}_csv_ligand"}
+                if descriptor_json.is_file():
+                    kwargs["from_json_descriptors"] = str(descriptor_json)
 
             try:
-                ligand_obj = ligand_module.Ligand(str(ligand_path), **kwargs)
-                payload = _collect_numeric_descriptors(ligand_obj, ligand_descriptor_names)
+                ligand_obj = self.ligand_module.Ligand(str(ligand_path), **kwargs)
+                payload = _collect_numeric_descriptors(ligand_obj, self.ligand_descriptor_names)
+                if self.save_json_descriptor and hasattr(ligand_obj, "to_json"):
+                    try:
+                        ligand_obj.to_json(overwrite=descriptor_json.is_file())
+                    except Exception as exc:
+                        print(
+                            f"Warning: failed to persist ligand descriptor json '{descriptor_json}': "
+                            f"{type(exc).__name__}: {exc}",
+                            file=sys.stderr,
+                        )
             except Exception as exc:
                 print(
                     f"Warning: failed to compute ligand descriptors for '{ligand_path}': "
@@ -552,17 +669,75 @@ def _write_database_results_csv(
                 )
                 payload = {}
 
-            ligand_descriptor_cache[cache_key] = payload
+            self.ligand_descriptor_cache[cache_key] = payload
             if payload:
                 return payload
 
         return {}
 
+
+def _compute_database_descriptor_json(
+    *,
+    database: str,
+    payload_paths: Sequence[str],
+) -> int:
+    resolver = _DescriptorResolver(save_json_descriptor=True)
+    processed = 0
+
+    ordered_payload_paths = sorted(set(payload_paths))
+    payload_iterator = _progress(
+        ordered_payload_paths,
+        desc=f"{database} json",
+        unit="payload",
+        dynamic_ncols=True,
+    )
+
+    for payload_path in payload_iterator:
+        payload_file = Path(payload_path)
+        if not payload_file.is_file():
+            continue
+
+        target_dir = payload_file.parent
+        receptor_path = target_dir.parents[2] / "receptor.pdb"
+        ligand_candidates = _candidate_ligand_paths(target_dir)
+
+        _ = resolver.load_receptor_descriptors(receptor_path, "")
+        _ = resolver.load_ligand_descriptors(ligand_candidates, "")
+        processed += 1
+
+    return processed
+
+
+def _write_database_results_csv(
+    *,
+    database: str,
+    payload_paths: Sequence[str],
+    csv_path: Union[str, Path],
+    oc_config: Any,
+    save_json_descriptor: bool = False,
+) -> int:
+    output_path = Path(csv_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    resolver = _DescriptorResolver(save_json_descriptor=save_json_descriptor)
+    receptor_descriptor_names = resolver.receptor_descriptor_names
+    ligand_descriptor_names = resolver.ligand_descriptor_names
+    receptor_descriptor_columns = [f"receptor_{name}" for name in receptor_descriptor_names]
+    ligand_descriptor_columns = [f"ligand_{name}" for name in ligand_descriptor_names]
+
     excluded_score_columns = {"gnina_default"}
     rows: List[Dict[str, Any]] = []
     score_columns: Set[str] = set()
 
-    for payload_path in sorted(set(payload_paths)):
+    ordered_payload_paths = sorted(set(payload_paths))
+    payload_iterator = _progress(
+        ordered_payload_paths,
+        desc=f"{database} csv+json" if save_json_descriptor else f"{database} csv",
+        unit="payload",
+        dynamic_ncols=True,
+    )
+
+    for payload_path in payload_iterator:
         payload_file = Path(payload_path)
         if not payload_file.is_file():
             continue
@@ -602,17 +777,10 @@ def _write_database_results_csv(
         receptor_name = str(payload.get("receptor", ""))
         target_name = str(payload.get("target", ""))
         receptor_path = target_dir.parents[2] / "receptor.pdb"
-        ligand_candidates: List[Path] = []
-        for candidate in (
-            target_dir / "ligand.mol2",
-            target_dir / "ligand.smi",
-            target_dir / "prepared_ligand.mol2",
-        ):
-            if candidate.is_file() and candidate not in ligand_candidates:
-                ligand_candidates.append(candidate)
+        ligand_candidates = _candidate_ligand_paths(target_dir)
 
-        receptor_descriptors = _load_receptor_descriptors(receptor_path, receptor_name)
-        ligand_descriptors = _load_ligand_descriptors(ligand_candidates, target_name)
+        receptor_descriptors = resolver.load_receptor_descriptors(receptor_path, receptor_name)
+        ligand_descriptors = resolver.load_ligand_descriptors(ligand_candidates, target_name)
 
         row: Dict[str, Any] = {
             "database": str(payload.get("database", database)),
@@ -709,6 +877,23 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         default="",
         help="Custom CSV output path. Only valid when exactly one database is selected.",
     )
+    descriptor_group = parser.add_mutually_exclusive_group()
+    descriptor_group.add_argument(
+        "--save-json-descriptor",
+        action="store_true",
+        help=(
+            "Generate the CSV with the default descriptor behavior, but also persist "
+            "missing or invalid receptor/ligand *_descriptors.json sidecars."
+        ),
+    )
+    descriptor_group.add_argument(
+        "--compute-json-descriptor",
+        action="store_true",
+        help=(
+            "Compute receptor/ligand *_descriptors.json sidecars for the selected "
+            "payloads and exit without generating pipeline_results.csv."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -747,17 +932,29 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     database_rule_root = Path(ocdb_path).resolve()
     _prepare_database_mounts(database_specs, database_rule_root)
 
+    if args.compute_json_descriptor and args.output:
+        raise RuntimeError("--output cannot be used with --compute-json-descriptor.")
+
     if args.output and len(selected_databases) != 1:
         raise RuntimeError("--output may only be used when exactly one --database is selected.")
 
     for database in selected_databases:
         payload_paths = _collect_existing_payloads_for_database(database_rule_root, database, selected_kinds)
+        if args.compute_json_descriptor:
+            processed = _compute_database_descriptor_json(
+                database=database,
+                payload_paths=payload_paths,
+            )
+            print(f"Computed descriptor json sidecars from {processed} payload(s); database={database}")
+            continue
+
         csv_path = Path(args.output).expanduser().resolve() if args.output else database_rule_root / database / "pipeline_results.csv"
         row_count = _write_database_results_csv(
             database=database,
             payload_paths=payload_paths,
             csv_path=csv_path,
             oc_config=oc_config,
+            save_json_descriptor=args.save_json_descriptor,
         )
         print(f"Wrote {csv_path} from {len(payload_paths)} payload(s); rows={row_count}; database={database}")
 

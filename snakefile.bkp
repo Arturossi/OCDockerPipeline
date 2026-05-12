@@ -2311,7 +2311,6 @@ pipeline_store_db_mid_execution = _as_bool(
     default=pipeline_store_db,
 )
 pipeline_export_database_csv = _as_bool(config.get("pipeline_export_database_csv", True), default=True)
-pipeline_save_json_descriptors = _as_bool(config.get("pipeline_save_json_descriptors", False), default=False)
 pipeline_discovery_cache = _as_bool(config.get("pipeline_discovery_cache", True), default=True)
 pipeline_report_include_python_packages = _as_bool(
     config.get("pipeline_report_include_python_packages", False),
@@ -2803,26 +2802,6 @@ def _receptor_path(database: str, receptor: str) -> Path:
     return _database_rule_root_path(database) / receptor / "receptor.pdb"
 
 
-def _receptor_descriptor_json_path(database: str, receptor: str) -> Path:
-    '''
-    Return receptor descriptor JSON sidecar path for one receptor entry.
-
-    Parameters
-    ----------
-    database : str
-        Database alias.
-    receptor : str
-        Receptor identifier.
-
-    Returns
-    -------
-    Path
-        Path to ``receptor_descriptors.json``.
-    '''
-
-    return _database_rule_root_path(database) / receptor / "receptor_descriptors.json"
-
-
 def _receptor_cache_manifest_path(database: str, receptor: str) -> Path:
     '''
     Return receptor cache manifest path for a receptor entry.
@@ -2889,30 +2868,6 @@ def _ligand_path(database: str, receptor: str, kind: str, target: str) -> Path:
     '''
 
     return _target_dir_path(database, receptor, kind, target) / "ligand.smi"
-
-
-def _ligand_descriptor_json_path(database: str, receptor: str, kind: str, target: str) -> Path:
-    '''
-    Return ligand descriptor JSON sidecar path for one target entry.
-
-    Parameters
-    ----------
-    database : str
-        Database alias.
-    receptor : str
-        Receptor identifier.
-    kind : str
-        Target kind.
-    target : str
-        Target identifier.
-
-    Returns
-    -------
-    Path
-        Path to ``ligand_descriptors.json``.
-    '''
-
-    return _target_dir_path(database, receptor, kind, target) / "ligand_descriptors.json"
 
 
 def _box_path(database: str, receptor: str, kind: str, target: str) -> Path:
@@ -3739,6 +3694,21 @@ def _database_results_csv_path(database: str) -> str:
     return str(_database_rule_root_path(database) / "pipeline_results.csv")
 
 
+def _collect_database_csv_targets() -> List[str]:
+    '''
+    Return CSV outputs requested by ``rule all`` based on config.
+
+    Returns
+    -------
+    List[str]
+        CSV output paths requested by current configuration.
+    '''
+
+    if not pipeline_export_database_csv:
+        return []
+    return [_database_results_csv_path(database) for database in selected_databases]
+
+
 def _payload_targets_for_database(database: str) -> List[str]:
     '''
     Filter global payload targets to only those under one database root.
@@ -3960,89 +3930,6 @@ def _configured_score_columns_for_csv() -> List[str]:
             _add(_config_score_column_for_csv(engine, str(scoring_function)))
 
     return ordered
-
-
-def _write_receptor_descriptor_json(receptor_path: Union[str, Path], descriptor_json: Union[str, Path]) -> None:
-    '''
-    Compute and persist one receptor descriptor JSON sidecar.
-
-    Parameters
-    ----------
-    receptor_path : Union[str, Path]
-        Receptor PDB path.
-    descriptor_json : Union[str, Path]
-        Expected ``receptor_descriptors.json`` output path.
-
-    Returns
-    -------
-    None
-        This function writes the descriptor JSON output.
-    '''
-
-    import OCDocker.Receptor as ocr
-
-    receptor_path = Path(receptor_path)
-    descriptor_json = Path(descriptor_json)
-    descriptor_json.parent.mkdir(parents=True, exist_ok=True)
-
-    with _file_lock(descriptor_json.with_name(f".{descriptor_json.name}.lock")):
-        receptor_obj = ocr.Receptor(
-            str(receptor_path),
-            name="receptor",
-            allow_missing_surface=True,
-        )
-        receptor_obj.to_json(overwrite=True)
-        if not _is_valid_file(descriptor_json):
-            raise RuntimeError(f"Failed to create receptor descriptor JSON at '{descriptor_json}'.")
-
-
-def _write_ligand_descriptor_json(ligand_path: Union[str, Path], descriptor_json: Union[str, Path]) -> None:
-    '''
-    Compute and persist one ligand descriptor JSON sidecar.
-
-    Parameters
-    ----------
-    ligand_path : Union[str, Path]
-        Primary ligand input path.
-    descriptor_json : Union[str, Path]
-        Expected ``ligand_descriptors.json`` output path.
-
-    Returns
-    -------
-    None
-        This function writes the descriptor JSON output.
-    '''
-
-    import OCDocker.Ligand as ocl
-
-    ligand_path = Path(ligand_path)
-    descriptor_json = Path(descriptor_json)
-    target_dir = descriptor_json.parent
-    target_dir.mkdir(parents=True, exist_ok=True)
-
-    candidates: List[Path] = []
-    for candidate in (
-        ligand_path,
-        target_dir / "ligand.mol2",
-        target_dir / "prepared_ligand.mol2",
-    ):
-        if candidate.is_file() and candidate not in candidates:
-            candidates.append(candidate)
-
-    errors: List[str] = []
-    with _file_lock(descriptor_json.with_name(f".{descriptor_json.name}.lock")):
-        for candidate in candidates:
-            try:
-                ligand_obj = ocl.Ligand(str(candidate), name="ligand")
-                ligand_obj.to_json(overwrite=True)
-                if _is_valid_file(descriptor_json):
-                    return
-                errors.append(f"{candidate}: descriptor JSON was not written")
-            except Exception as exc:
-                errors.append(f"{candidate}: {type(exc).__name__}: {exc}")
-
-    details = "; ".join(errors) if errors else "no ligand candidates found"
-    raise RuntimeError(f"Failed to create ligand descriptor JSON at '{descriptor_json}': {details}")
 
 
 def _write_database_results_csv(database: str, payload_paths: List[str], csv_path: Union[str, Path]) -> None:
@@ -4967,26 +4854,6 @@ def _wc_receptor_path(wildcards) -> str:
     return str(_receptor_path(wildcards.database, wildcards.receptor))
 
 
-def _wc_receptor_descriptor_json_path(wildcards) -> Union[str, List[str]]:
-    '''
-    Resolve receptor descriptor JSON output path from Snakemake wildcards.
-
-    Parameters
-    ----------
-    wildcards : Any
-        Snakemake wildcard object.
-
-    Returns
-    -------
-    str
-        Receptor descriptor JSON path for current wildcard tuple.
-    '''
-
-    if not pipeline_save_json_descriptors:
-        return []
-    return str(_receptor_descriptor_json_path(wildcards.database, wildcards.receptor))
-
-
 def _wc_receptor_cache_manifest_path(wildcards) -> str:
     '''
     Resolve receptor cache-manifest path from Snakemake wildcards.
@@ -5021,26 +4888,6 @@ def _wc_ligand_path(wildcards) -> str:
     '''
 
     return str(_ligand_path(wildcards.database, wildcards.receptor, wildcards.kind, wildcards.target))
-
-
-def _wc_ligand_descriptor_json_path(wildcards) -> Union[str, List[str]]:
-    '''
-    Resolve ligand descriptor JSON output path from Snakemake wildcards.
-
-    Parameters
-    ----------
-    wildcards : Any
-        Snakemake wildcard object.
-
-    Returns
-    -------
-    str
-        Ligand descriptor JSON path for current wildcard tuple.
-    '''
-
-    if not pipeline_save_json_descriptors:
-        return []
-    return str(_ligand_descriptor_json_path(wildcards.database, wildcards.receptor, wildcards.kind, wildcards.target))
 
 
 def _wc_box_path(wildcards) -> str:
@@ -6235,72 +6082,6 @@ rule prepare_ligand_cache:
             raise
 
 
-rule receptor_descriptor_json:
-    """
-    Compute receptor descriptor JSON sidecar for reuse by CSV/DB workflows.
-    """
-    input:
-        receptor=_wc_receptor_path,
-    output:
-        json=os.path.join(
-            database_rule_root_str,
-            "{database}",
-            "{receptor}",
-            "receptor_descriptors.json",
-        ),
-    log:
-        str(PIPELINE_RULE_FAILURE_LOG_DIR / "receptor_descriptor_json" / "{database}" / "{receptor}.log"),
-    priority: 115
-    threads: 1
-    run:
-        try:
-            _write_receptor_descriptor_json(
-                receptor_path=str(input.receptor),
-                descriptor_json=str(output.json),
-            )
-        except Exception as exc:
-            _append_rule_failure_log(log[0], "receptor_descriptor_json", wildcards, exc)
-            raise
-
-
-rule ligand_descriptor_json:
-    """
-    Compute ligand descriptor JSON sidecar for reuse by CSV/DB workflows.
-    """
-    input:
-        ligand=_wc_ligand_path,
-    output:
-        json=os.path.join(
-            database_rule_root_str,
-            "{database}",
-            "{receptor}",
-            "compounds",
-            "{kind}",
-            "{target}",
-            "ligand_descriptors.json",
-        ),
-    log:
-        str(
-            PIPELINE_RULE_FAILURE_LOG_DIR
-            / "ligand_descriptor_json"
-            / "{database}"
-            / "{receptor}"
-            / "{kind}"
-            / "{target}.log"
-        ),
-    priority: 115
-    threads: 1
-    run:
-        try:
-            _write_ligand_descriptor_json(
-                ligand_path=str(input.ligand),
-                descriptor_json=str(output.json),
-            )
-        except Exception as exc:
-            _append_rule_failure_log(log[0], "ligand_descriptor_json", wildcards, exc)
-            raise
-
-
 def _run_engine_job(*, wildcards, rule_input, rule_output, threads_count: int, engine_name: str) -> None:
     '''
     Execute one engine job and persist status/progress metadata.
@@ -6714,9 +6495,7 @@ rule run_pipeline:
     input:
         receptor=_wc_receptor_path,
         receptor_cache=_wc_receptor_cache_manifest_path,
-        receptor_descriptor_json=_wc_receptor_descriptor_json_path,
         ligand=_wc_ligand_path,
-        ligand_descriptor_json=_wc_ligand_descriptor_json_path,
         box=_wc_box_path,
         engine_summaries=_engine_summary_inputs,
         core_summary=_wc_core_summary_path,
@@ -6880,6 +6659,7 @@ rule all:
     default_target: True
     input:
         allkinds=all_payload_targets,
+        database_csvs=_collect_database_csv_targets(),
     run:
         # Keep final message concise for long unattended runs.
         print(

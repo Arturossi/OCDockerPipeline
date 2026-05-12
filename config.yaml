@@ -52,6 +52,9 @@ pipeline_store_db_mid_execution: true
 # Export one consolidated CSV per selected database alias at the end of the DAG
 # (written as `<ocdb>/<database>/pipeline_results.csv`).
 pipeline_export_database_csv: true
+# Persist receptor_descriptors.json and ligand_descriptors.json sidecars while
+# exporting CSVs/regenerating snapshots, so descriptor work can be reused later.
+pipeline_save_json_descriptors: true
 # Include full installed Python package list in run_report.json.
 # Keep false for large production runs unless you explicitly need package-level provenance.
 pipeline_report_include_python_packages: false

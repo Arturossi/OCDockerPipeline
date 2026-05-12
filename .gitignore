@@ -5,3 +5,4 @@ nohup.out
 logs/*
 __pycache__/*
 *.pyc
+*.pid
