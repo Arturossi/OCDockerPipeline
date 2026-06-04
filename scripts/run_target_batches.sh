@@ -124,6 +124,47 @@ parse_bool() {
     esac
 }
 
+normalize_forwarded_config_args() {
+    # Snakemake versions differ in how repeated --config blocks are propagated
+    # into subprocess jobs. Keep all config key/value pairs in one block so
+    # runtime selectors such as database_sources=PDBbind are not dropped when
+    # the batch runner forces pipeline_export_database_csv=false.
+    local -a rebuilt_args=()
+    local -a config_args=()
+    local arg=""
+    local token=""
+    local i=0
+
+    while (( i < ${#extra_args[@]} )); do
+        arg="${extra_args[$i]}"
+        if [[ "$arg" == "--config" ]]; then
+            i=$(( i + 1 ))
+            while (( i < ${#extra_args[@]} )) && [[ "${extra_args[$i]}" != --* ]]; do
+                token="${extra_args[$i]}"
+                if [[ "$token" != pipeline_export_database_csv=* ]]; then
+                    config_args+=("$token")
+                fi
+                i=$(( i + 1 ))
+            done
+            continue
+        fi
+        if [[ "$arg" == --config=* ]]; then
+            token="${arg#--config=}"
+            if [[ -n "$token" && "$token" != pipeline_export_database_csv=* ]]; then
+                config_args+=("$token")
+            fi
+            i=$(( i + 1 ))
+            continue
+        fi
+
+        rebuilt_args+=("$arg")
+        i=$(( i + 1 ))
+    done
+
+    config_args+=("pipeline_export_database_csv=false")
+    extra_args=("${rebuilt_args[@]}" --config "${config_args[@]}")
+}
+
 fail() {
     # Consistent fatal error helper.
     echo "Error: $*" >&2
@@ -570,6 +611,7 @@ if (( ! has_retries )); then
     extra_args=(--retries "$snakemake_retries" "${extra_args[@]}")
     echo "Info: auto-added '--retries ${snakemake_retries}' (use --snakemake-retries or pass --retries after '--' to override)."
 fi
+normalize_forwarded_config_args
 
 # ---------------------------------------------------------------------------
 # 5) User-facing run summary before execution starts.
@@ -613,10 +655,6 @@ for (( idx=from_idx; idx<=to_idx; idx++ )); do
     if [[ ${#extra_args[@]} -gt 0 ]]; then
         cmd+=("${extra_args[@]}")
     fi
-    # Disable per-database CSV export in batch runs to avoid all-target fan-in
-    # dependencies being reintroduced for each partition. Append it last so a
-    # user-provided --config cannot re-enable CSV export accidentally.
-    cmd+=(--config "pipeline_export_database_csv=false")
 
     batch_rc=0
     if "${cmd[@]}"; then
