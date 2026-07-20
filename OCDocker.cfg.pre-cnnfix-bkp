@@ -264,17 +264,8 @@ gnina_cnn_scoring = rescore
 # Weight of CNN score when ranking poses
 gnina_cnn = default
 
-# Available CNN models for rescoring. Set to just "default" (matching
-# gnina_cnn above) rather than left empty: OCDocker.Config falls back to the
-# hardcoded GNINA_DEFAULT_CNN_MODELS (66 models) whenever this key is
-# missing/empty during cfg parsing, so an empty value does NOT reduce to
-# [gnina_cnn] the way _get_rescore_cnn_models' own fallback would suggest --
-# it must be set explicitly. The previous 66-model list produced 66
-# individual gnina score_only calls per ligand, none of whose per-model
-# results survive into the final payload (only 7 gnina keys are retained:
-# ad4_scoring, default, dkoes_fast/scoring/scoring_old, vina, vinardo) --
-# pure wasted compute at dataset scale.
-gnina_cnn_models = default
+# Available CNN models for rescoring
+gnina_cnn_models = all_default_to_default_1_3_1,all_default_to_default_1_3_2,all_default_to_default_1_3_3,crossdock_default2018,crossdock_default2018_1,crossdock_default2018_1_3,crossdock_default2018_1_3_1,crossdock_default2018_1_3_2,crossdock_default2018_1_3_3,crossdock_default2018_1_3_4,crossdock_default2018_2,crossdock_default2018_3,crossdock_default2018_4,crossdock_default2018_KD_1,crossdock_default2018_KD_2,crossdock_default2018_KD_3,crossdock_default2018_KD_4,crossdock_default2018_KD_5,default1.0,default2017,dense,dense_1,dense_1_3,dense_1_3_1,dense_1_3_2,dense_1_3_3,dense_1_3_4,dense_1_3_PT_KD,dense_1_3_PT_KD_1,dense_1_3_PT_KD_2,dense_1_3_PT_KD_3,dense_1_3_PT_KD_4,dense_1_3_PT_KD_def2018,dense_1_3_PT_KD_def2018_1,dense_1_3_PT_KD_def2018_2,dense_1_3_PT_KD_def2018_3,dense_1_3_PT_KD_def2018_4,dense_2,dense_3,dense_4,fast,general_default2018,general_default2018_1,general_default2018_2,general_default2018_3,general_default2018_4,general_default2018_KD_1,general_default2018_KD_2,general_default2018_KD_3,general_default2018_KD_4,general_default2018_KD_5,redock_default2018,redock_default2018_1,redock_default2018_1_3,redock_default2018_1_3_1,redock_default2018_1_3_2,redock_default2018_1_3_3,redock_default2018_1_3_4,redock_default2018_2,redock_default2018_3,redock_default2018_4,redock_default2018_KD_1,redock_default2018_KD_2,redock_default2018_KD_3,redock_default2018_KD_4,redock_default2018_KD_5
 
 # CNN model file (optional)
 gnina_cnn_model = no

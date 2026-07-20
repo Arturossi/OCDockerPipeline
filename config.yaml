@@ -14,8 +14,10 @@ db_backend: "postgresql"
 # - Explicit path with alias: "mydb=/abs/path/to/MyDB"
 # - Explicit path only: "/abs/path/to/MyDB" (alias inferred from directory name)
 database_sources:
-  - "PDBbind"
-  - "DUDEz"
+  # PDBbind and DUDEz temporarily disabled -- LIT-PCBA-only run.
+  # - "PDBbind"
+  # - "DUDEz"
+  - "LITPCBA=/data/hd4tb/OCDocker/data/ocdb2/LITPCBA"
 # Legacy fallback (used only when database_sources is omitted):
 # run_databases:
 #   - "PDBbind"
@@ -75,20 +77,37 @@ pipeline_engine_mem_mb:
 # GPU scheduling for docking jobs.
 # By default Gnina consumes 1 GPU slot; Vina/PLANTS consume 0.
 # You can disable GPU accounting by setting both values to 0.
+#
+# NOTE: this deployment runs gnina CPU-only (gnina_no_gpu = yes in
+# OCDocker.cfg, confirmed live: `--no_gpu` in the actual process args, 0% GPU
+# utilization while gnina jobs run). So this "gpu" resource isn't limiting
+# real GPU contention -- it's just a Snakemake scheduling slot. Left at 1 it
+# artificially caps gnina to 1 concurrent job even though gnina only claims 2
+# CPU threads/job (pipeline_engine_threads.gnina) and the 18-core budget
+# could support ~9 concurrent gnina jobs. Set to 9 (18 cores / 2 threads) so
+# this resource is never the binding constraint -- real concurrency is then
+# governed by --cores and each engine's declared thread count, same as
+# vina/plants. (The historical ~60min/ligand slowdown was almost certainly
+# CPU thread oversubscription from unbounded concurrent gnina processes
+# before any accounting existed, not GPU contention.)
 pipeline_engine_gpu_default: 0
 pipeline_engine_gpu:
-  gnina: 0
+  gnina: 1
 
 # Global GPU pool for Snakemake scheduler.
 # This is applied automatically in the snakefile via workflow.global_resources["gpu"].
-pipeline_total_gpus: 0
+pipeline_total_gpus: 9
 
 # Optional engine priorities (higher runs first when ready).
 # This helps prevent GNINA starvation when many CPU-only jobs are queued.
-pipeline_engine_priority_default: 50
+# Note: run_engine_vina/run_engine_gnina hardcode their own priority in the
+# snakefile (160/170) rather than reading this map; only "plants" is wired
+# through _engine_priority(). Kept above every prep-stage rule (<=140) so
+# docking is preferred over starting new ligand intake.
+pipeline_engine_priority_default: 150
 pipeline_engine_priority:
   gnina: 100
-  plants: 60
+  plants: 150
   vina: 50
 
 # Optional per-engine parallel caps (max concurrent jobs per engine).

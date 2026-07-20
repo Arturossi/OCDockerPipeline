@@ -4967,34 +4967,6 @@ def _wc_receptor_path(wildcards) -> str:
     return str(_receptor_path(wildcards.database, wildcards.receptor))
 
 
-def _ligand_group_id(wildcards) -> str:
-    '''
-    Group id for the per-target job chain (box/cache/descriptor/engines/
-    postprocess/oddt/finalize) of a single ligand entry.
-
-    Each rule `run:` block is dispatched by Snakemake as its own subprocess
-    (full Python+Snakemake startup per job); with hundreds of thousands of
-    ligand entries, that per-job overhead dominates wall time far more than
-    the actual docking/rescoring work. Grouping every stage of one ligand's
-    chain under a single group id lets Snakemake execute them in one
-    subprocess instead of ~9, without changing rule semantics or output
-    paths -- each rule's own input/output declarations are unchanged, so
-    already-completed outputs are still detected and skipped normally.
-
-    Parameters
-    ----------
-    wildcards : Any
-        Snakemake wildcard object.
-
-    Returns
-    -------
-    str
-        Group id unique to this (database, receptor, kind, target) entry.
-    '''
-
-    return f"ligand_{wildcards.database}_{wildcards.receptor}_{wildcards.kind}_{wildcards.target}"
-
-
 def _wc_receptor_descriptor_json_path(wildcards) -> Union[str, List[str]]:
     '''
     Resolve receptor descriptor JSON output path from Snakemake wildcards.
@@ -5548,7 +5520,7 @@ def _postprocess_pipeline_box(
     import OCDocker.Docking.PLANTS as ocplants
     import OCDocker.Docking.Smina as ocsmina
     import OCDocker.Docking.Vina as ocvina
-    import OCDocker.Processing.Preprocessing.RMSDClustering as ocrmsd
+    import OCDocker.Processing.Preprocessing.RmsdClustering as ocrmsd
     import OCDocker.Toolbox.Conversion as occonversion
     import OCDocker.Toolbox.MoleculeProcessing as ocmolproc
 
@@ -6190,9 +6162,8 @@ rule prepare_target_box:
             / "{kind}"
             / "{target}.log"
         ),
-    priority: 135
+    priority: 130
     threads: 1
-    group: _ligand_group_id
     run:
         try:
             _ensure_target_box_from_reference_ligand(
@@ -6240,9 +6211,8 @@ rule prepare_ligand_cache:
             / "{kind}"
             / "{target}.log"
         ),
-    priority: 130
+    priority: 125
     threads: 1
-    group: _ligand_group_id
     run:
         try:
             target_dir = Path(os.path.dirname(input.ligand))
@@ -6280,7 +6250,7 @@ rule receptor_descriptor_json:
         ),
     log:
         str(PIPELINE_RULE_FAILURE_LOG_DIR / "receptor_descriptor_json" / "{database}" / "{receptor}.log"),
-    priority: 125
+    priority: 115
     threads: 1
     run:
         try:
@@ -6318,9 +6288,8 @@ rule ligand_descriptor_json:
             / "{kind}"
             / "{target}.log"
         ),
-    priority: 125
+    priority: 115
     threads: 1
-    group: _ligand_group_id
     run:
         try:
             _write_ligand_descriptor_json(
@@ -6423,12 +6392,11 @@ rule run_engine_vina:
             "vina.json",
         ),
     threads: _engine_threads("vina")
-    priority: 160
+    priority: 90
     resources:
         mem_mb=_engine_mem_mb("vina"),
         gpu=_engine_gpu("vina"),
         engine_slots_vina=1
-    group: _ligand_group_id
     run:
         _run_engine_job(
             wildcards=wildcards,
@@ -6460,12 +6428,11 @@ rule run_engine_gnina:
             "gnina.json",
         ),
     threads: _engine_threads("gnina")
-    priority: 170
+    priority: 100
     resources:
         mem_mb=_engine_mem_mb("gnina"),
         gpu=_engine_gpu("gnina"),
         engine_slots_gnina=1
-    group: _ligand_group_id
     run:
         _run_engine_job(
             wildcards=wildcards,
@@ -6502,7 +6469,6 @@ rule run_engine_plants:
         mem_mb=_engine_mem_mb("plants"),
         gpu=_engine_gpu("plants"),
         engine_slots_plants=1
-    group: _ligand_group_id
     run:
         _run_engine_job(
             wildcards=wildcards,
@@ -6540,11 +6506,10 @@ rule run_pipeline_core:
             "{target}",
             "pipeline_core_summary.json",
         ),
-    priority: 180
+    priority: 110
     threads: pipeline_postprocess_threads
     resources:
         mem_mb=pipeline_postprocess_mem_mb
-    group: _ligand_group_id
     run:
         threads_count = _apply_thread_limit_env(int(threads))
 
@@ -6638,11 +6603,10 @@ rule run_oddt:
             "{target}",
             "oddt_status.json",
         ),
-    priority: 190
+    priority: 115
     threads: pipeline_oddt_threads
     resources:
         mem_mb=pipeline_oddt_mem_mb
-    group: _ligand_group_id
     run:
         threads_count = _apply_thread_limit_env(int(threads))
 
@@ -6785,11 +6749,10 @@ rule run_pipeline:
             / "{kind}"
             / "{target}.log"
         ),
-    priority: 200
+    priority: 120
     threads: 1
     resources:
         mem_mb=pipeline_postprocess_mem_mb
-    group: _ligand_group_id
     run:
         try:
             target_dir = Path(os.path.dirname(input.ligand))
