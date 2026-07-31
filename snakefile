@@ -1478,6 +1478,50 @@ def _store_pipeline_results_in_db(
         return bool(complex_ok and pipeline_run_ok), complex_name, ignored_keys
 
 
+def _store_oddt_results_in_db(job_name: str, summary: Dict[str, Any]) -> bool:
+    '''
+    Update the Complexes/PipelineRuns rows already written by ``run_pipeline_core``
+    with ODDT scores, which only become available in the later ``run_pipeline``
+    rule (ODDT runs in its own dedicated, isolated rule after core post-processing).
+
+    Parameters
+    ----------
+    job_name : str
+        Pipeline job identifier, matching the ``name`` used at initial insert.
+    summary : Dict[str, Any]
+        Final summary payload, already merged with ODDT status/scores.
+
+    Returns
+    -------
+    bool
+        ``True`` when both rows were updated successfully.
+    '''
+
+    rescoring = summary.get("rescoring", {})
+    oddt_scores = rescoring.get("oddt", {}) if isinstance(rescoring, dict) else {}
+    if not isinstance(oddt_scores, dict) or not oddt_scores:
+        return True
+
+    _ensure_db_runtime()
+
+    from OCDocker.DB.Models.Complexes import Complexes
+    from OCDocker.DB.Models.PipelineRuns import PipelineRuns
+
+    with _db_write_lock:
+        score_payload, _ignored = _flatten_rescoring_to_complex_payload({"oddt": oddt_scores})
+        if not score_payload:
+            return True
+        score_payload["name"] = job_name
+        complex_ok = Complexes.insert_or_update(score_payload)
+
+        pipeline_run_ok = PipelineRuns.insert_or_update({
+            "name": job_name,
+            "rescoring_json": json.dumps(_to_jsonable(rescoring), sort_keys=True),
+            "summary_json": json.dumps(_to_jsonable(summary), sort_keys=True),
+        })
+        return bool(complex_ok and pipeline_run_ok)
+
+
 def _pipeline_progress_row_name(job_name: str, engine: str) -> str:
     '''
     Build a deterministic DB row name for engine progress records.
@@ -6460,7 +6504,7 @@ rule run_engine_gnina:
             "gnina.json",
         ),
     threads: _engine_threads("gnina")
-    priority: 170
+    priority: 340
     resources:
         mem_mb=_engine_mem_mb("gnina"),
         gpu=_engine_gpu("gnina"),
@@ -6821,6 +6865,13 @@ rule run_pipeline:
 
             if summary_output_path is not None:
                 _write_json(summary_output_path, summary)
+
+            if pipeline_store_db:
+                try:
+                    if not _store_oddt_results_in_db(job_name, summary):
+                        print(f"Warning: DB update with ODDT scores failed for job {job_name}.")
+                except Exception as exc:
+                    print(f"Warning: failed to store ODDT results in DB for {job_name}: {exc}")
 
             representative_pose = summary.get("representative_pose")
             representative_engine = summary.get("representative_engine")

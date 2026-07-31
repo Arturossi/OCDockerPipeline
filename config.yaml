@@ -75,24 +75,20 @@ pipeline_engine_mem_mb:
   vina: 1500
 
 # GPU scheduling for docking jobs.
-# By default Gnina consumes 1 GPU slot; Vina/PLANTS consume 0.
-# You can disable GPU accounting by setting both values to 0.
 #
 # NOTE: this deployment runs gnina CPU-only (gnina_no_gpu = yes in
 # OCDocker.cfg, confirmed live: `--no_gpu` in the actual process args, 0% GPU
-# utilization while gnina jobs run). So this "gpu" resource isn't limiting
-# real GPU contention -- it's just a Snakemake scheduling slot. Left at 1 it
-# artificially caps gnina to 1 concurrent job even though gnina only claims 2
-# CPU threads/job (pipeline_engine_threads.gnina) and the 18-core budget
-# could support ~9 concurrent gnina jobs. Set to 9 (18 cores / 2 threads) so
-# this resource is never the binding constraint -- real concurrency is then
-# governed by --cores and each engine's declared thread count, same as
-# vina/plants. (The historical ~60min/ligand slowdown was almost certainly
-# CPU thread oversubscription from unbounded concurrent gnina processes
-# before any accounting existed, not GPU contention.)
+# utilization while gnina jobs run). So this "gpu" resource never protected
+# real GPU contention -- it was just a Snakemake scheduling slot, and being
+# the only engine claiming a nonzero value on this resource dimension left
+# gnina with zero completions over ~20h of a live run despite having the
+# highest engine priority and identical mem_mb cost to vina/plants. Set to 0
+# (matching vina/plants) so gnina's resource profile is fully symmetric with
+# the other engines; real concurrency is governed by --cores and each
+# engine's declared thread count, same as vina/plants.
 pipeline_engine_gpu_default: 0
 pipeline_engine_gpu:
-  gnina: 1
+  gnina: 0
 
 # Global GPU pool for Snakemake scheduler.
 # This is applied automatically in the snakefile via workflow.global_resources["gpu"].
