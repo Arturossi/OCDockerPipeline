@@ -150,10 +150,14 @@ snakemake -s snakefile --cores 16 --use-conda --conda-frontend mamba --keep-goin
 Recommended production shape on this host:
 
 ```bash
-snakemake -s snakefile --cores 16 --resources mem_mb=28000 --use-conda --conda-frontend mamba --keep-going
+snakemake -s snakefile --cores 16 --resources mem_mb=22000 --use-conda --conda-frontend mamba --keep-going
 ```
 
-Why `--resources mem_mb=28000`: rule-level `mem_mb` limits are enforced only when a global resource budget is provided.
+Why `--resources mem_mb=22000`: rule-level `mem_mb` limits are enforced only when a global resource budget is
+provided. This host has 31 GB RAM; leave real headroom for the desktop session (browser, Electron apps,
+IDE/editor backends) instead of budgeting close to total RAM, since Snakemake's per-job `mem_mb` is a scheduling
+estimate, not an enforced cap — actual usage can run over it. A budget that leaves only a few GB of slack turns
+any such overrun into full swap exhaustion and a system freeze rather than a contained OOM kill.
 
 ### Target Batching (Large DAGs / Testing)
 
@@ -171,7 +175,7 @@ scripts/run_target_batches.sh --batch-size 5 --from 1 --to 1 -- \
 ```bash
 # Production-style fractional batching (20 partitions)
 scripts/run_target_batches.sh --total-batches 20 --from 1 --to 20 -- \
-  --cores 16 --resources mem_mb=28000 --keep-going
+  --cores 16 --resources mem_mb=22000 --keep-going
 ```
 
 Notes:

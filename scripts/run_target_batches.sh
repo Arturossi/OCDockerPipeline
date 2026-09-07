@@ -66,13 +66,13 @@ Examples:
   scripts/run_target_batches.sh --batch-size 5 --from 1 --to 1 -- --cores 8 --resources mem_mb=12000
 
   # Full run over 20 fractions
-  scripts/run_target_batches.sh --total-batches 20 -- --cores 16 --resources mem_mb=28000 --keep-going
+  scripts/run_target_batches.sh --total-batches 20 -- --cores 16 --resources mem_mb=22000 --keep-going
 
   # Full fixed-size run (all derived batches)
-  scripts/run_target_batches.sh --batch-size 500 --all --conda-env ocdocker -- --cores 16 --resources mem_mb=28000 --keep-going
+  scripts/run_target_batches.sh --batch-size 500 --all --conda-env ocdocker -- --cores 16 --resources mem_mb=22000 --keep-going
 
   # Same using conda env directly from script
-  scripts/run_target_batches.sh --total-batches 20 --conda-env ocdocker -- --cores 16 --resources mem_mb=28000 --keep-going
+  scripts/run_target_batches.sh --total-batches 20 --conda-env ocdocker -- --cores 16 --resources mem_mb=22000 --keep-going
 
 Complete example:
 
@@ -95,7 +95,7 @@ Complete example:
     --logger snkmt \
     --logger-snkmt-db /data/hd4tb/OCDocker/OCDockerPipeline/.snakemake/snkmt.db \
     --cores 18 \
-    --resources mem_mb=28000 \
+    --resources mem_mb=22000 \
     --keep-going \
     --rerun-incomplete \
     --rerun-triggers mtime \

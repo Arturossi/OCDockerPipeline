@@ -17,7 +17,7 @@ database_sources:
   # PDBbind and DUDEz temporarily disabled -- LIT-PCBA-only run.
   # - "PDBbind"
   # - "DUDEz"
-  - "LITPCBA=/home/artur/ocdocker_fast/LITPCBA"
+  - "LITPCBA=/data/hd4tb/OCDocker/data/ocdb2/LITPCBA"
 # Legacy fallback (used only when database_sources is omitted):
 # run_databases:
 #   - "PDBbind"

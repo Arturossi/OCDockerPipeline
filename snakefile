@@ -1712,13 +1712,12 @@ def _prepare_cached_receptors_for_receptor(receptor_path):
 
     if pipeline_requires_pdbqt:
         prepared_pdbqt = receptor_dir / "prepared_receptor.pdbqt"
-        # Drop stale zero-byte artifacts even when overwrite=False.
-        if prepared_pdbqt.is_file() and prepared_pdbqt.stat().st_size == 0:
-            prepared_pdbqt.unlink()
-        elif overwrite and prepared_pdbqt.exists():
-            prepared_pdbqt.unlink()
 
-        if not prepared_pdbqt.exists() or prepared_pdbqt.stat().st_size == 0:
+        def _prepare_pdbqt() -> int:
+            # Drop stale zero-byte artifacts, or force regeneration when requested.
+            if prepared_pdbqt.is_file() and (prepared_pdbqt.stat().st_size == 0 or overwrite):
+                prepared_pdbqt.unlink()
+
             rc = None
             # Try preparers in configured priority order because some receptors
             # can fail in one backend but succeed in another.
@@ -1734,28 +1733,32 @@ def _prepare_cached_receptors_for_receptor(receptor_path):
                 rc = _normalize_exit_code(prep_fn())
                 # Accept only successful and non-empty artifacts.
                 if rc == 0 and prepared_pdbqt.exists() and prepared_pdbqt.stat().st_size > 0:
-                    break
+                    return 0
 
-            if rc != 0 or not prepared_pdbqt.exists() or prepared_pdbqt.stat().st_size == 0:
-                raise RuntimeError(
-                    f"Failed to prepare cached PDBQT receptor for '{receptor_path}'. "
-                    "Checked Vina/Smina/Gnina preparers."
-                )
+            return rc if rc is not None else 1
+
+        # Locked so concurrent ligand jobs for the same receptor (large receptors
+        # like MAPK1/KAT2A can have thousands running at once) don't race to
+        # prepare/overwrite this shared per-receptor artifact simultaneously.
+        if not _ensure_prepared_file_with_lock(prepared_pdbqt, _prepare_pdbqt):
+            raise RuntimeError(
+                f"Failed to prepare cached PDBQT receptor for '{receptor_path}'. "
+                "Checked Vina/Smina/Gnina preparers."
+            )
 
     if pipeline_requires_mol2:
         prepared_mol2 = receptor_dir / "prepared_receptor.mol2"
-        # Drop stale zero-byte artifacts even when overwrite=False.
-        if prepared_mol2.is_file() and prepared_mol2.stat().st_size == 0:
-            prepared_mol2.unlink()
-        elif overwrite and prepared_mol2.exists():
-            prepared_mol2.unlink()
 
-        if not prepared_mol2.exists() or prepared_mol2.stat().st_size == 0:
-            rc = _normalize_exit_code(
+        def _prepare_mol2() -> int:
+            # Drop stale zero-byte artifacts, or force regeneration when requested.
+            if prepared_mol2.is_file() and (prepared_mol2.stat().st_size == 0 or overwrite):
+                prepared_mol2.unlink()
+            return _normalize_exit_code(
                 ocplants.run_prepare_receptor(receptor_path, str(prepared_mol2), log_file="", overwrite=overwrite)
             )
-            if rc != 0 or not prepared_mol2.exists() or prepared_mol2.stat().st_size == 0:
-                raise RuntimeError(f"Failed to prepare cached MOL2 receptor for '{receptor_path}' using PLANTS/SPORES.")
+
+        if not _ensure_prepared_file_with_lock(prepared_mol2, _prepare_mol2):
+            raise RuntimeError(f"Failed to prepare cached MOL2 receptor for '{receptor_path}' using PLANTS/SPORES.")
 
 
 def _cache_settings_signature() -> str:
@@ -1898,6 +1901,61 @@ def _write_cache_manifest(cache_manifest_path: Union[str, Path], receptor_path: 
     cache_manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
+def _ensure_canonical_receptor_pdb(receptor_path: Union[str, Path]) -> None:
+    '''
+    Canonicalize a receptor PDB's CHARMM-style atom/residue names exactly once.
+
+    ``Receptor.__init__``'s default ``canonicalize_pdb="auto"`` rewrites the
+    receptor PDB in place on every call when the file still looks CHARMM-styled,
+    and every per-target rule (prepare_ligand_cache, docking engines, ...)
+    constructs a fresh ``Receptor`` from the same shared receptor path. Without
+    this guard, every one of those jobs re-checks and potentially rewrites the
+    file, which both races unlocked concurrent writers on the same path and
+    bumps its mtime on every write, making every already-completed downstream
+    target look stale under ``--rerun-triggers mtime``. Gating behind a lock
+    plus a sentinel file ensures this happens at most once per receptor, even
+    if the underlying detection never converges to "already fixed".
+
+    Parameters
+    ----------
+    receptor_path : Union[str, Path]
+        Path to the receptor PDB file.
+
+    Returns
+    -------
+    None
+        This function canonicalizes the receptor PDB in place when needed.
+    '''
+
+    receptor_path = Path(receptor_path)
+    if receptor_path.suffix.lower() != ".pdb":
+        return
+
+    sentinel = receptor_path.with_name(f".{receptor_path.name}.canonicalized")
+    if sentinel.is_file():
+        return
+
+    import OCDocker.Toolbox.MoleculeProcessing as ocmolproc
+
+    lock_file = receptor_path.with_name(f".{receptor_path.name}.canonicalize.lock")
+    with _file_lock(lock_file):
+        if sentinel.is_file():
+            return
+        if ocmolproc.needs_canonical_pdb_fix(str(receptor_path), collapse_resnames=True):
+            # Tolerate failure the same way load_mol's own "auto" path does:
+            # fall back to the original file rather than blocking every job.
+            _normalize_exit_code(
+                ocmolproc.convert_pdb_charmm_to_canonical(
+                    str(receptor_path),
+                    str(receptor_path),
+                    collapse_resnames=True,
+                    overwrite=True,
+                    in_place=True,
+                )
+            )
+        sentinel.touch()
+
+
 def _ensure_receptor_cache_ready(receptor_path: Union[str, Path], cache_manifest_path: Union[str, Path]) -> None:
     '''
     Prepare receptor artifacts and refresh cache manifest when stale.
@@ -1917,6 +1975,7 @@ def _ensure_receptor_cache_ready(receptor_path: Union[str, Path], cache_manifest
 
     receptor_path = Path(receptor_path)
     cache_manifest_path = Path(cache_manifest_path)
+    _ensure_canonical_receptor_pdb(receptor_path)
     if _cache_manifest_is_valid(cache_manifest_path, receptor_path):
         return
 
@@ -2152,10 +2211,12 @@ def _prepare_cached_ligands_for_target(
         os.environ["OCDOCKER_TIMEOUT"] = str(pipeline_timeout)
 
     receptor_dir = receptor_path.parent
+    _ensure_canonical_receptor_pdb(receptor_path)
     receptor_obj = ocr.Receptor(
         str(receptor_path),
         name=f"{job_name}_receptor",
         allow_missing_surface=True,
+        canonicalize_pdb=False,
     )
     ligand_obj = ocl.Ligand(str(ligand_path), name=job_name)
 
@@ -4029,11 +4090,13 @@ def _write_receptor_descriptor_json(receptor_path: Union[str, Path], descriptor_
     descriptor_json = Path(descriptor_json)
     descriptor_json.parent.mkdir(parents=True, exist_ok=True)
 
+    _ensure_canonical_receptor_pdb(receptor_path)
     with _file_lock(descriptor_json.with_name(f".{descriptor_json.name}.lock")):
         receptor_obj = ocr.Receptor(
             str(receptor_path),
             name="receptor",
             allow_missing_surface=True,
+            canonicalize_pdb=False,
         )
         receptor_obj.to_json(overwrite=True)
         if not _is_valid_file(descriptor_json):
@@ -5412,7 +5475,8 @@ def _run_single_engine_via_api(
     if pipeline_timeout:
         os.environ["OCDOCKER_TIMEOUT"] = str(pipeline_timeout)
 
-    receptor_obj = ocr.Receptor(str(receptor_path), name=f"{job_name}_receptor")
+    _ensure_canonical_receptor_pdb(receptor_path)
+    receptor_obj = ocr.Receptor(str(receptor_path), name=f"{job_name}_receptor", canonicalize_pdb=False)
     ligand_name = job_name[:-7] if job_name.endswith("_ligand") else job_name
     ligand_obj = ocl.Ligand(str(ligand_path), name=ligand_name)
 
@@ -5504,6 +5568,7 @@ def _run_single_engine_via_api(
                 str(receptor_path),
                 name=f"{job_name}_receptor",
                 allow_missing_surface=True,
+                canonicalize_pdb=False,
             )
             isolated_ligand = ocl.Ligand(str(ligand_path), name=ligand_name)
             return _run_box(box, isolated_receptor, isolated_ligand)
@@ -6005,10 +6070,12 @@ def _run_pipeline_postprocess_from_summaries(
     import OCDocker.Ligand as ocl
     import OCDocker.Receptor as ocr
 
+    _ensure_canonical_receptor_pdb(receptor_path)
     receptor_obj = ocr.Receptor(
         str(receptor_path),
         name=f"{job_name}_receptor",
         allow_missing_surface=True,
+        canonicalize_pdb=False,
     )
     ligand_name = job_name[:-7] if job_name.endswith("_ligand") else job_name
     ligand_obj = ocl.Ligand(str(ligand_path), name=ligand_name)
@@ -6104,6 +6171,7 @@ def _run_pipeline_postprocess_from_summaries(
                 str(receptor_path),
                 name=f"{job_name}_receptor",
                 allow_missing_surface=True,
+                canonicalize_pdb=False,
             )
             isolated_ligand = ocl.Ligand(str(ligand_path), name=ligand_name)
             return _process_box(box, isolated_receptor, isolated_ligand)
