@@ -1,6 +1,5 @@
 .snakemake
 tmp/*
-nohup.out
 *_bad.mol2
 logs/*
 __pycache__/*
@@ -9,4 +8,4 @@ __pycache__/*
 obsidian/
 .snakemake.old*
 *.log
-batch_*.out
+*.out
