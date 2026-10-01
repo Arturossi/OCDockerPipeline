@@ -9,3 +9,4 @@ obsidian/
 .snakemake.old*
 *.log
 *.out
+OCDocker.cfg

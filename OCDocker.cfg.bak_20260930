@@ -33,7 +33,7 @@ spores = /data/hd4tb/OCDocker/software/docking/plants/SPORES_64bit
 smina = /data/hd4tb/OCDocker/software/docking/smina/build/smina
 
 # Vina paths
-vina = /data/hd4tb/OCDocker/software/docking/vina/bin/vina_memcap.sh
+vina = /data/hd4tb/OCDocker/software/docking/vina/bin/vina
 vina_split = /data/hd4tb/OCDocker/software/docking/vina/bin/vina_split
 
 # Gnina path
