@@ -106,6 +106,10 @@ pipeline_engine_priority:
   plants: 150
   vina: 50
 
+# Priority of receptor/ligand descriptor JSON jobs (default 125, below the engines).
+# Above every engine, they run first and each complex is packaged as soon as its docking ends.
+pipeline_descriptor_priority: 345
+
 # Optional per-engine parallel caps (max concurrent jobs per engine).
 pipeline_engine_max_parallel:
   vina: 10

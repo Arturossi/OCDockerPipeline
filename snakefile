@@ -2484,6 +2484,8 @@ pipeline_engine_gpu_map = _parse_engine_int_map(config.get("pipeline_engine_gpu"
 # Optional rule priority map to bias mixed-engine scheduling.
 pipeline_engine_priority_default = max(1, int(config.get("pipeline_engine_priority_default", 50)))
 pipeline_engine_priority_map = _parse_engine_int_map(config.get("pipeline_engine_priority", {"gnina": 100}))
+# Descriptor JSON jobs only need raw inputs; above the engines they run first, so payloads finish as docking does.
+pipeline_descriptor_priority = max(1, int(config.get("pipeline_descriptor_priority", 125)))
 
 # Optional per-engine parallel caps. When set, each engine consumes one dedicated slot.
 pipeline_engine_max_parallel_map = _parse_engine_int_map(config.get("pipeline_engine_max_parallel", {}))
@@ -6392,7 +6394,7 @@ rule receptor_descriptor_json:
         ),
     log:
         str(PIPELINE_RULE_FAILURE_LOG_DIR / "receptor_descriptor_json" / "{database}" / "{receptor}.log"),
-    priority: 125
+    priority: pipeline_descriptor_priority
     threads: 1
     run:
         try:
@@ -6430,7 +6432,7 @@ rule ligand_descriptor_json:
             / "{kind}"
             / "{target}.log"
         ),
-    priority: 125
+    priority: pipeline_descriptor_priority
     threads: 1
     group: _ligand_group_id
     run:
