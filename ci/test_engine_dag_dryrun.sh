@@ -106,25 +106,26 @@ if [[ "${STATUS}" -ne 0 ]]; then
     exit "${STATUS}"
 fi
 
-if ! printf '%s\n' "${OUTPUT}" | grep -q "^rule prepare_receptor_cache:"; then
+# Per-target rules share a group, and Snakemake indents grouped jobs in its dry-run listing.
+if ! printf '%s\n' "${OUTPUT}" | grep -qE "^[[:space:]]*rule prepare_receptor_cache:"; then
     echo "Expected rule prepare_receptor_cache was not scheduled."
     exit 1
 fi
 
-if ! printf '%s\n' "${OUTPUT}" | grep -q "^rule prepare_ligand_cache:"; then
+if ! printf '%s\n' "${OUTPUT}" | grep -qE "^[[:space:]]*rule prepare_ligand_cache:"; then
     echo "Expected rule prepare_ligand_cache was not scheduled."
     exit 1
 fi
 
 RUN_ENGINE_COUNT="$(
-    printf '%s\n' "${OUTPUT}" | awk '/^rule run_engine_[^:]+:/{count++} END{print count+0}'
+    printf '%s\n' "${OUTPUT}" | awk '/^[[:space:]]*rule run_engine_[^:]+:/{count++} END{print count+0}'
 )"
 if [[ "${RUN_ENGINE_COUNT}" -ne 2 ]]; then
     echo "Expected exactly 2 run_engine jobs, got ${RUN_ENGINE_COUNT}."
     exit 1
 fi
 
-if ! printf '%s\n' "${OUTPUT}" | grep -q "^rule run_pipeline:"; then
+if ! printf '%s\n' "${OUTPUT}" | grep -qE "^[[:space:]]*rule run_pipeline:"; then
     echo "Expected rule run_pipeline was not scheduled."
     exit 1
 fi
